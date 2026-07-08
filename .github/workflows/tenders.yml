@@ -2,47 +2,27 @@ name: Tenders Parser
 
 on:
   schedule:
-    # Каждые 6 часов: 00:00, 06:00, 12:00, 18:00 UTC
     - cron: '0 */6 * * *'
-  workflow_dispatch:  # ручной запуск
+  workflow_dispatch:
 
 jobs:
   parse:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
-      - name: 📥 Клонировать репозиторий
-        uses: actions/checkout@v4
-
-      - name: 🐍 Настроить Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: 📦 Установить системные зависимости
-        run: |
+      - run: |
           sudo apt-get update -qq
-                    sudo apt-get install -y libatk1.0-0t64 libatk-bridge2.0-0t64 \
-            libcups2t64 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-            libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
-            libnss3 libnspr4 libdrm2 libatspi2.0-0t64
-
-
-      - name: 📚 Установить Python-пакеты
-        run: |
-          pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml pandas openpyxl \
-            python-dateutil playwright
-
-      - name: 🎭 Установить браузер
-        run: python -m playwright install chromium
-
-      - name: 🚀 Запустить парсер
-        run: python parser.py
-
-      - name: 📤 Загрузить артефакты
-        uses: actions/upload-artifact@v4
+          sudo apt-get install -y libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+            libpango-1.0-0 libcairo2 libasound2t64 libnss3 libnspr4 libdrm2 libatspi2.0-0t64
+      - run: pip install requests beautifulsoup4 lxml pandas openpyxl python-dateutil playwright
+      - run: python -m playwright install chromium
+      - run: python parser.py
+      - uses: actions/upload-artifact@v4
         with:
           name: tenders-output
           path: |
@@ -50,23 +30,3 @@ jobs:
             out/*.html
             out/*.csv
           retention-days: 30
-
-      - name: 🚀 Опубликовать в Release
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest-${{ github.run_number }}
-          name: Тендеры от ${{ github.run_number }}
-          body: |
-            Автоматический запуск парсера тендеров
-            
-            📅 Дата: ${{ github.event.head_commit.timestamp }}
-            🔗 Запуск: #${{ github.run_number }}
-            
-            Скачайте файлы ниже для просмотра.
-          draft: false
-          prerelease: false
-          files: |
-            out/*.xlsx
-            out/*.html
-            out/*.csv
