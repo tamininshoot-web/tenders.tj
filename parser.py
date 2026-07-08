@@ -206,3 +206,223 @@ async def fetch_eproc():
     except Exception as e: print(f"  err: {e}")
     print(f"  eproc: {len(out)}"); return out
 
+
+def build_excel(records):
+    print("📊 Building Excel...")
+    df = pd.DataFrame(records)
+    cols = ["source", "tender_id", "title_en", "title_ru", "title_tj", "title_original", "donor", "funding_type", "country", "region", "organization", "category", "publication_date", "submission_deadline", "procurement_method", "eligibility", "description", "documents_url", "contact_name", "contact_email", "contact_phone", "source_url", "language", "scraped_at"]
+    df = df[[c for c in cols if c in df.columns]]
+    df.to_csv(OUT_DIR / f"tenders_tj_{TODAY.isoformat()}.csv", index=False, encoding="utf-8-sig")
+    df.to_excel(OUT_DIR / f"tenders_tj_{TODAY.isoformat()}.xlsx", index=False, engine="openpyxl")
+    print(f"  → {len(df)} записей")
+    return df
+
+def build_catalog(df):
+    print("📋 Building каталог...")
+    df = df.copy()
+    df['title_ru_main'] = df.apply(title_ru, axis=1)
+    df['cat_ru'] = df['category'].map(CAT_RU).fillna(df['category'])
+    df['donor_ru'] = df['donor'].map(DONOR_RU).fillna(df['donor'])
+    df['source_ru'] = df['source'].map(SOURCE_RU).fillna(df['source'])
+    df['method_ru'] = df['procurement_method'].map(METHOD_RU).fillna(df['procurement_method'].fillna('—'))
+    df['dl_dt'] = pd.to_datetime(df['submission_deadline'], errors='coerce')
+    def status(row):
+        dl = row['dl_dt']; src = row['source']
+        if pd.isna(dl):
+            if src == 'World Bank': return '🟢 Активен (ВБ)'
+            if src == 'aedpmu.tj': return '🟢 Активен (aedpmu)'
+            return '⚪ Без дедлайна'
+        days = (dl - pd.Timestamp(NOW)).days
+        if days < 0: return f'🔴 Истёк ({abs(days)} дн.)'
+        if days <= 3: return f'🔥 Срочно — {days} дн.'
+        if days <= 7: return f'⚠ Скоро — {days} дн.'
+        if days <= 30: return f'🟢 Активен — {days} дн.'
+        return f'🟡 Долгосрочный — {days} дн.'
+    df['status'] = df.apply(status, axis=1)
+    def prio(row):
+        s = row['status']
+        if 'Срочно' in s or 'Скоро' in s: return 1
+        if 'Истёк' in s: return 5
+        if 'Долгосрочный' in s: return 4
+        if 'Активен' in s: return 2
+        return 3
+    df['priority'] = df.apply(prio, axis=1)
+    df = df.sort_values(['priority', 'publication_date'], ascending=[True, False])
+    records = []
+    for _, r in df.iterrows():
+        records.append({'priority': int(r['priority']), 'status': str(r['status']), 'source': str(r['source_ru']), 'donor': str(r['donor_ru']), 'category': str(r['cat_ru']), 'title': str(r['title_ru_main'])[:300], 'title_en': str(r.get('title_en',''))[:300] if pd.notna(r.get('title_en','')) else '', 'method': str(r['method_ru']), 'organization': str(r.get('organization','')) if pd.notna(r.get('organization','')) else '—', 'publication_date': str(r['publication_date']) if pd.notna(r['publication_date']) else '—', 'submission_deadline': str(r['submission_deadline']) if pd.notna(r['submission_deadline']) else '—', 'description': str(r.get('description','')) if pd.notna(r.get('description','')) else '', 'contact_email': str(r.get('contact_email','')) if pd.notna(r.get('contact_email','')) else '', 'source_url': str(r.get('source_url','')) if pd.notna(r.get('source_url','')) else '#'})
+    data_js = json.dumps(records, ensure_ascii=False)
+    html = '''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Каталог IT-тендеров — Таджикистан</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f1419;color:#e6edf3;padding:20px;line-height:1.5}
+.header{max-width:1600px;margin:0 auto 24px}.header h1{font-size:26px;font-weight:700;margin-bottom:6px;background:linear-gradient(135deg,#58a6ff,#a371f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header .sub{color:#8b949e;font-size:13px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;max-width:1600px;margin:0 auto 20px}
+.kpi{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 16px}.kpi .num{font-size:28px;font-weight:800;color:#e6edf3}.kpi .label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.kpi.hot .num{color:#f85149}.kpi.it .num{color:#3fb950}.kpi.equip .num{color:#a371f7}
+.filters{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:0 auto 20px;max-width:1600px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.filter label{display:block;font-size:11px;color:#8b949e;text-transform:uppercase;margin-bottom:4px;letter-spacing:.5px}
+.filter select,.filter input{width:100%;padding:8px 10px;border:1px solid #30363d;border-radius:6px;background:#0d1117;color:#e6edf3;font-size:13px}
+.reset-btn{align-self:end;padding:8px 16px;border:1px solid #f85149;background:transparent;color:#f85149;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600}
+.results-bar{max-width:1600px;margin:0 auto 12px;display:flex;justify-content:space-between;align-items:center;color:#8b949e;font-size:13px;flex-wrap:wrap;gap:12px}
+.cards{max-width:1600px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;transition:all .15s}.card:hover{border-color:#58a6ff}
+.card.priority-1{border-left:4px solid #f85149}.card.priority-2{border-left:4px solid #3fb950}.card.priority-3{border-left:4px solid #8b949e}.card.priority-4{border-left:4px solid #58a6ff}
+.card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px}
+.card-badges{display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0}
+.badge{font-size:10px;padding:3px 8px;border-radius:10px;font-weight:600;white-space:nowrap}
+.badge.source{background:#21262d;color:#c9d1d9}.badge.donor{background:#1F6FEB22;color:#58a6ff;border:1px solid #58a6ff44}.badge.cat{background:#A371F722;color:#a371f7;border:1px solid #a371f744}
+.status{font-size:11px;padding:4px 10px;border-radius:10px;font-weight:700;white-space:nowrap}
+.status-срочно{background:#f85149;color:#fff}.status-скоро{background:#d29922;color:#fff}.status-активен{background:#3fb950;color:#fff}.status-долгосрочный{background:#58a6ff;color:#fff}.status-истёк{background:#6e7681;color:#fff}.status-без{background:#21262d;color:#8b949e}
+.title{font-size:15px;font-weight:600;color:#e6edf3;margin-bottom:4px;line-height:1.4}.title-en{font-size:11px;color:#6e7681;font-style:italic;margin-bottom:6px}
+.org{font-size:12px;color:#8b949e;margin-bottom:6px}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px;font-size:12px;margin-bottom:8px}
+.meta-item{display:flex;flex-direction:column}.meta-label{font-size:10px;color:#6e7681;text-transform:uppercase;letter-spacing:.5px}.meta-val{color:#c9d1d9}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.action{padding:6px 12px;border-radius:6px;font-size:12px;text-decoration:none;font-weight:600;background:#21262d;color:#c9d1d9;border:1px solid #30363d}
+.action.primary{background:#1F6FEB;color:#fff;border-color:#1F6FEB}
+.empty{text-align:center;padding:60px 20px;color:#8b949e;font-size:14px}
+</style></head><body>
+<div class="header"><h1>📋 Каталог IT-тендеров и оборудования — Таджикистан</h1>
+<div class="sub">Автообновление каждые 6 часов • 90 дней • Все поля на русском</div></div>
+<div class="kpis">
+  <div class="kpi hot"><div class="label">🔥 Срочно</div><div class="num" id="kpi-hot">0</div></div>
+  <div class="kpi"><div class="label">⚠ Скоро</div><div class="num" id="kpi-soon">0</div></div>
+  <div class="kpi it"><div class="label">IT-разработка</div><div class="num" id="kpi-it">0</div></div>
+  <div class="kpi equip"><div class="label">Оборудование</div><div class="num" id="kpi-equip">0</div></div>
+  <div class="kpi"><div class="label">Всего</div><div class="num" id="kpi-total">0</div></div>
+</div>
+<div class="filters">
+  <div class="filter"><label>Поиск</label><input type="text" id="f-search" placeholder="digital, IT, AMIS..."></div>
+  <div class="filter"><label>Категория</label><select id="f-category"><option value="">Все</option></select></div>
+  <div class="filter"><label>Донор</label><select id="f-donor"><option value="">Все</option></select></div>
+  <div class="filter"><label>Актуальность</label><select id="f-status"><option value="">Все</option><option value="hot">🔥 Срочно</option><option value="soon">⚠ Скоро</option><option value="active">🟢 Активен</option></select></div>
+  <div class="filter"><label>Сортировка</label><select id="f-sort"><option value="priority">По приоритету</option><option value="deadline">По дедлайну</option><option value="date-desc">По дате</option></select></div>
+  <div class="filter"><label>&nbsp;</label><button class="reset-btn" onclick="resetFilters()">⟲ Сбросить</button></div>
+</div>
+<div class="results-bar"><span>Показано: <strong id="shown">0</strong> из <strong id="total">0</strong></span></div>
+<div class="cards" id="cards"></div>
+<script>
+const data = __DATA__;
+const uniq = arr => [...new Set(arr)].sort();
+const fillSelect = (id, vals) => { const s = document.getElementById(id); vals.forEach(v => { if (v) { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); } }); };
+fillSelect('f-category', uniq(data.map(d => d.category)));
+fillSelect('f-donor', uniq(data.map(d => d.donor)));
+function statusClass(s) { if (s.includes('Срочно')) return 'status-срочно'; if (s.includes('Скоро')) return 'status-скоро'; if (s.includes('Активен')) return 'status-активен'; if (s.includes('Долгосрочный')) return 'status-долгосрочный'; if (s.includes('Истёк')) return 'status-истёк'; return 'status-без'; }
+function render() {
+  const q = document.getElementById('f-search').value.toLowerCase();
+  const cat = document.getElementById('f-category').value;
+  const donor = document.getElementById('f-donor').value;
+  const status = document.getElementById('f-status').value;
+  const sort = document.getElementById('f-sort').value;
+  let f = data.filter(d => {
+    if (q && ![d.title, d.title_en, d.description, d.organization, d.category].join(' ').toLowerCase().includes(q)) return false;
+    if (cat && d.category !== cat) return false;
+    if (donor && d.donor !== donor) return false;
+    if (status === 'hot' && !d.status.includes('Срочно')) return false;
+    if (status === 'soon' && !d.status.includes('Скоро') && !d.status.includes('Срочно')) return false;
+    if (status === 'active' && !d.status.includes('Активен')) return false;
+    return true;
+  });
+  if (sort === 'priority') f.sort((a, b) => (a.priority||99) - (b.priority||99));
+  if (sort === 'deadline') f.sort((a, b) => new Date(a.submission_deadline||'9999') - new Date(b.submission_deadline||'9999'));
+  if (sort === 'date-desc') f.sort((a, b) => new Date(b.publication_date||0) - new Date(a.publication_date||0));
+  document.getElementById('cards').innerHTML = f.length ? f.map(d => {
+    const tEn = (d.title_en && d.title_en !== d.title) ? d.title_en : '';
+    return `<div class="card priority-${d.priority||3}"><div class="card-top"><div style="flex:1;min-width:0;"><div class="card-badges" style="margin-bottom:6px;"><span class="badge source">${d.source||'—'}</span><span class="badge donor">${d.donor||'—'}</span><span class="badge cat">${d.category||'—'}</span></div></div><span class="status ${statusClass(d.status)}">${d.status||''}</span></div><div class="title">${d.title||'(без названия)'}</div>${tEn?`<div class="title-en">EN: ${tEn}</div>`:''}<div class="org">📍 ${d.organization||'—'}</div>${d.description?`<div class="org" style="margin-bottom:8px;">${d.description.slice(0,300)}${d.description.length>300?'…':''}</div>`:''}<div class="meta"><div class="meta-item"><span class="meta-label">Метод</span><span class="meta-val">${d.method||'—'}</span></div><div class="meta-item"><span class="meta-label">Опубликован</span><span class="meta-val">${d.publication_date||'—'}</span></div><div class="meta-item"><span class="meta-label">Дедлайн</span><span class="meta-val">${d.submission_deadline||'—'}</span></div>${d.contact_email?`<div class="meta-item"><span class="meta-label">Email</span><span class="meta-val">${d.contact_email}</span></div>`:''}</div><div class="actions"><a class="action primary" href="${d.source_url}" target="_blank">↗ Открыть</a></div></div>`;
+  }).join('') : '<div class="empty"><h3>Ничего не найдено</h3></div>';
+  document.getElementById('shown').textContent = f.length;
+}
+function updateKPIs() {
+  document.getElementById('kpi-hot').textContent = data.filter(d => (d.status||'').includes('Срочно')).length;
+  document.getElementById('kpi-soon').textContent = data.filter(d => (d.status||'').includes('Скоро')).length;
+  const itCats = ['IT-разработка (софт, системы)','Поставка IT-оборудования','Телеком/Сетевое оборудование','Финтех/Цифровые платежи','Электронное правительство/закупки','Геоданные/Цифровое с/х'];
+  const eqCats = ['Поставка IT-оборудования','Лабораторное оборудование','Электрооборудование/Питание','Техника/Спецтранспорт','Транспорт','Мебель','Телеком/Сетевое оборудование'];
+  document.getElementById('kpi-it').textContent = data.filter(d => itCats.includes(d.category)).length;
+  document.getElementById('kpi-equip').textContent = data.filter(d => eqCats.includes(d.category)).length;
+  document.getElementById('kpi-total').textContent = data.length;
+  document.getElementById('total').textContent = data.length;
+}
+function resetFilters() { ['f-search','f-category','f-donor','f-status','f-sort'].forEach(id => document.getElementById(id).value = id==='f-sort'?'priority':''); render(); }
+['f-search','f-category','f-donor','f-status','f-sort'].forEach(id => { document.getElementById(id).addEventListener('input', render); document.getElementById(id).addEventListener('change', render); });
+updateKPIs(); render();
+</script></body></html>'''.replace("__DATA__", data_js)
+    with open(OUT_DIR / f"catalog_{TODAY.isoformat()}.html", "w") as f: f.write(html)
+    print(f"  → catalog_{TODAY.isoformat()}.html")
+
+def build_dashboard(df):
+    print("📊 Building дашборд...")
+    df = df.copy()
+    df['pub_month'] = pd.to_datetime(df['publication_date'], errors='coerce').dt.to_period('M').astype(str)
+    df['pub_month'] = df['pub_month'].fillna('—')
+    summary = {'total': int(len(df)), 'by_source': df.groupby('source').size().to_dict(), 'by_category': df.groupby('category').size().to_dict(), 'by_donor': df.groupby('donor').size().to_dict(), 'by_pub_month': df[df['pub_month']!='—'].groupby('pub_month').size().to_dict()}
+    data_js = json.dumps(summary, default=str, ensure_ascii=False)
+    html = '''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Дашборд IT-тендеры — Таджикистан</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f1419;color:#e6edf3;padding:24px}
+.header{max-width:1400px;margin:0 auto 32px}.header h1{font-size:28px;font-weight:700;margin-bottom:8px;background:linear-gradient(135deg,#58a6ff,#a371f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header .sub{color:#8b949e;font-size:14px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;max-width:1400px;margin:0 auto 32px}
+.kpi{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;position:relative;overflow:hidden}
+.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#58a6ff,#a371f7)}
+.kpi .num{font-size:36px;font-weight:800;margin:4px 0}.kpi .label{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:20px;max-width:1400px;margin:0 auto}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px}
+.card h2{font-size:15px;font-weight:600;color:#c9d1d9;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.card h2 .ico{width:4px;height:16px;background:#58a6ff;border-radius:2px}
+.chart-wrap{position:relative;height:280px}.chart-wrap.tall{height:360px}
+</style></head><body>
+<div class="header"><h1>📊 Дашборд: IT-тендеры и оборудование — Таджикистан</h1>
+<div class="sub">Автообновление каждые 6 часов • Период: 90 дней</div></div>
+<div class="kpis">
+  <div class="kpi"><div class="label">Всего тендеров</div><div class="num" id="kpi-total">0</div></div>
+  <div class="kpi"><div class="label">IT-разработка</div><div class="num" id="kpi-it">0</div></div>
+  <div class="kpi"><div class="label">Оборудование</div><div class="num" id="kpi-equip">0</div></div>
+  <div class="kpi"><div class="label">Консалтинг / TA</div><div class="num" id="kpi-consult">0</div></div>
+</div>
+<div class="grid">
+  <div class="card"><h2><span class="ico"></span>По источникам</h2><div class="chart-wrap"><canvas id="c1"></canvas></div></div>
+  <div class="card"><h2><span class="ico"></span>По донорам</h2><div class="chart-wrap"><canvas id="c2"></canvas></div></div>
+  <div class="card"><h2><span class="ico"></span>По категориям</h2><div class="chart-wrap tall"><canvas id="c3"></canvas></div></div>
+  <div class="card"><h2><span class="ico"></span>Публикации по месяцам</h2><div class="chart-wrap"><canvas id="c4"></canvas></div></div>
+</div>
+<script>
+const data = __DATA__;
+const colors = ['#58a6ff','#a371f7','#3fb950','#ff8c42','#f85149','#d29922','#d2a8ff','#39c5cf','#7ee787','#ffa657','#ff7b72','#79c0ff','#e3b341','#bc8cff'];
+const opt = {responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#c9d1d9'}},tooltip:{backgroundColor:'#161b22',titleColor:'#e6edf3',bodyColor:'#c9d1d9',borderColor:'#30363d',borderWidth:1}}};
+new Chart(document.getElementById('c1'),{type:'doughnut',data:{labels:Object.keys(data.by_source),datasets:[{data:Object.values(data.by_source),backgroundColor:colors,borderColor:'#0f1419',borderWidth:2}]},options:{...opt,cutout:'55%'}});
+new Chart(document.getElementById('c2'),{type:'bar',data:{labels:Object.keys(data.by_donor).map(s=>s.length>35?s.slice(0,35)+'…':s),datasets:[{data:Object.values(data.by_donor),backgroundColor:colors[0],borderRadius:4}]},options:{...opt,indexAxis:'y',plugins:{...opt.plugins,legend:{display:false}},scales:{x:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}},y:{ticks:{color:'#c9d1d9'},grid:{display:false}}}}}),
+new Chart(document.getElementById('c3'),{type:'bar',data:{labels:Object.keys(data.by_category),datasets:[{data:Object.values(data.by_category),backgroundColor:colors,borderRadius:4}]},options:{...opt,indexAxis:'y',plugins:{...opt.plugins,legend:{display:false}},scales:{x:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}},y:{ticks:{color:'#c9d1d9',font:{size:10}},grid:{display:false}}}}}),
+new Chart(document.getElementById('c4'),{type:'line',data:{labels:Object.keys(data.by_pub_month),datasets:[{data:Object.values(data.by_pub_month),borderColor:colors[0],backgroundColor:'rgba(88,166,255,.15)',fill:true,tension:.3,borderWidth:2.5,pointBackgroundColor:colors[0],pointRadius:4}]},options:{...opt,plugins:{...opt.plugins,legend:{display:false}},scales:{x:{ticks:{color:'#c9d1d9'},grid:{color:'#21262d'}},y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'},beginAtZero:true}}}});
+document.getElementById('kpi-total').textContent = data.total;
+const itCats = ['Software / IT Development','IT Equipment Supply','Telecom / Network','Fintech / Digital Payments','E-Government / E-Procurement','Geo-spatial / Digital Agriculture'];
+const eqCats = ['IT Equipment Supply','Lab Equipment','Power / Electrical','Machinery / Vehicles','Vehicles','Furniture','Telecom / Network'];
+const csCats = ['Consulting','Training / TA','Studies / Audit'];
+document.getElementById('kpi-it').textContent = Object.entries(data.by_category).filter(([k])=>itCats.includes(k)).reduce((s,[,v])=>s+v,0);
+document.getElementById('kpi-equip').textContent = Object.entries(data.by_category).filter(([k])=>eqCats.includes(k)).reduce((s,[,v])=>s+v,0);
+document.getElementById('kpi-consult').textContent = Object.entries(data.by_category).filter(([k])=>csCats.includes(k)).reduce((s,[,v])=>s+v,0);
+</script></body></html>'''.replace("__DATA__", data_js)
+    with open(OUT_DIR / f"dashboard_{TODAY.isoformat()}.html", "w") as f: f.write(html)
+    print(f"  → dashboard_{TODAY.isoformat()}.html")
+
+async def main():
+    print(f"\n=== Парсер тендеров: Таджикистан | {NOW.isoformat()} ===\n")
+    all_records = []
+    all_records.extend(fetch_worldbank())
+    all_records.extend(fetch_undp())
+    all_records.extend(fetch_investcom())
+    all_records.extend(fetch_aedpmu())
+    all_records.extend(fetch_tenders_tj())
+    all_records.extend(await fetch_eproc())
+    seen = set(); uniq = []
+    for r in all_records:
+        k = (r["source"], r.get("tender_id", ""), r.get("source_url", ""))
+        if k in seen: continue
+        seen.add(k); uniq.append(r)
+    print(f"\n=== ИТОГО: {len(uniq)} уникальных ===\n")
+    df = build_excel(uniq)
+    build_catalog(df)
+    build_dashboard(df)
+    print(f"\n✅ Готово! Файлы в {OUT_DIR}/")
+
+if __name__ == "__main__":
+    asyncio.run(main())
