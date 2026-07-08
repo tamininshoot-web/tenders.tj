@@ -361,8 +361,8 @@ function render() {
 function kpis() {
   document.getElementById('k1').textContent = data.filter(d => (d.status || '').includes('Срочно')).length;
   document.getElementById('k2').textContent = data.filter(d => (d.status || '').includes('Скоро')).length;
-  const itCats = ['IT-разработка', 'Поставка IT-оборудования', 'Телеком/Сеть', 'Финтех/Цифровые платежи', 'Электронное правительство', 'Геоданные/Цифровое с/х'];
-  const eqCats = ['Поставка IT-оборудования', 'Лабораторное оборудование', 'Электрооборудование', 'Техника/Спецтранспорт', 'Транспорт', 'Мебель', 'Телеком/Сеть'];
+ const itCats = ['IT-разработка', 'IT-разработка (софт, системы)', 'Поставка IT-оборудования', 'IT Equipment Supply', 'Телеком/Сеть', 'Telecom / Network', 'Финтех/Цифровые платежи', 'Fintech / Digital Payments', 'Электронное правительство', 'E-Government / E-Procurement', 'Геоданные/Цифровое с/х', 'Geo-spatial / Digital Agriculture', 'Software / IT Development'];
+ const eqCats = ['Поставка IT-оборудования', 'IT Equipment Supply', 'Лабораторное оборудование', 'Lab Equipment', 'Электрооборудование', 'Power / Electrical', 'Техника/Спецтранспорт', 'Machinery / Vehicles', 'Транспорт', 'Vehicles', 'Мебель', 'Furniture', 'Телеком/Сеть', 'Telecom / Network'];
   document.getElementById('k3').textContent = data.filter(d => itCats.includes(d.category)).length;
   document.getElementById('k4').textContent = data.filter(d => eqCats.includes(d.category)).length;
   document.getElementById('k5').textContent = data.length;
