@@ -5,6 +5,11 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
   parse:
     runs-on: ubuntu-latest
@@ -22,11 +27,14 @@ jobs:
       - run: pip install requests beautifulsoup4 lxml pandas openpyxl python-dateutil playwright
       - run: python -m playwright install chromium
       - run: python parser.py
-      - uses: actions/upload-artifact@v4
+      - name: Копировать файлы в docs
+        run: |
+          cp out/*.xlsx docs/ 2>/dev/null || true
+          cp out/*.csv docs/ 2>/dev/null || true
+          cp out/*.html docs/ 2>/dev/null || true
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
-          name: tenders-output
-          path: |
-            out/*.xlsx
-            out/*.html
-            out/*.csv
-          retention-days: 30
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4
