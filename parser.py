@@ -120,3 +120,89 @@ def fetch_aedpmu():
     except Exception as e: print(f"  err: {e}")
     print(f"  aed: {len(out)}"); return out
 
+def fetch_tenders_tj():
+    print("[5/6] tenders.tj..."); out = []
+    base = "https://www.tenders.tj"
+    try:
+        for pg in range(1, 4):
+            r = requests.get(f"{base}/index.php?do=poisk&page={pg}", headers=H, timeout=30)
+            if r.status_code != 200: break
+            soup = BeautifulSoup(r.text, "lxml")
+            for it in soup.find_all("a", href=re.compile(r"/procurement/\d+\.html")):
+                href = it.get("href", ""); title = it.get_text(" ", strip=True)
+                if not title or len(title) < 5: continue
+                if not href.startswith("http"): href = f"{base}{href}"
+                m = re.search(r"/procurement/(\d+)\.html", href)
+                out.append(normalize({"source": "tenders.tj", "tender_id": m.group(1) if m else "", "title_ru": title, "title_tj": title, "title_original": title, "donor": "Агрегатор госзакупок РТ", "funding_type": "State/Donor", "country": "Tajikistan", "source_url": href, "language": "Russian/Tajik"}))
+            time.sleep(0.3)
+        print(f"  Fetching details for {min(30, len(out))}...")
+        for r in out[:30]:
+            try:
+                d = requests.get(r["source_url"], headers=H, timeout=15)
+                if d.status_code == 200:
+                    s = BeautifulSoup(d.text, "lxml"); txt = s.get_text("\n", strip=True)
+                    m1 = re.search(r"Дата публикации:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", txt)
+                    if m1: r["publication_date"] = parse_d(m1.group(1))
+                    m2 = re.search(r"Крайний срок / Deadline:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", txt)
+                    if m2: r["submission_deadline"] = m2.group(1)
+                    m3 = re.search(r"Организатор:\s*([^\n]+)", txt)
+                    if m3: r["organization"] = m3.group(1).strip()
+                    m4 = re.search(r"Отрасль:\s*([^\n]+)", txt)
+                    if m4: r["category"] = m4.group(1).strip()
+                    m5 = re.search(r"Тип объявления\s*([^\n]+)", txt)
+                    if m5: r["procurement_method"] = m5.group(1).strip()
+                    m6 = re.search(r"Область реализации проекта:\s*([^\n]+)", txt)
+                    if m6: r["region"] = m6.group(1).strip()
+                    m7 = re.search(r"Контактный E-mail:\s*([^\n]+)", txt)
+                    if m7: r["contact_email"] = m7.group(1).strip()
+                    m8 = re.search(r"Контактный телефон:\s*([^\n]+)", txt)
+                    if m8: r["contact_phone"] = m8.group(1).strip()
+                    m9 = re.search(r"Описание:\s*(.+?)(?:Требования|$)", txt, re.DOTALL)
+                    if m9: r["description"] = m9.group(1).strip()[:2000]
+                    if not in_window(r.get("publication_date", "")): r["__skip__"] = True
+            except: pass
+            time.sleep(0.2)
+        out = [r for r in out if not r.get("__skip__")]
+    except Exception as e: print(f"  err: {e}")
+    print(f"  tenders: {len(out)}"); return out
+
+async def fetch_eproc():
+    print("[6/6] eprocurement.gov.tj..."); out = []
+    if not HAS_PLAYWRIGHT: return out
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+            ctx = await browser.new_context(user_agent=UA)
+            page = await ctx.new_page()
+            await page.goto("https://eprocurement.gov.tj/ru/searchanno", wait_until="domcontentloaded", timeout=90000)
+            await page.wait_for_timeout(5000)
+            try:
+                await page.fill('input[name="date_start"]', CUTOFF.strftime("%Y-%m-%d %H:%M:%S"))
+                await page.fill('input[name="date_end"]', NOW.strftime("%Y-%m-%d %H:%M:%S"))
+                sb = await page.query_selector_all('button[type="submit"], input[type="submit"]')
+                if sb: await sb[0].click(); await page.wait_for_timeout(5000)
+            except: pass
+            html = await page.content(); soup = BeautifulSoup(html, "lxml")
+            for t in soup.find_all("table"):
+                rows = t.find_all("tr")
+                if len(rows) < 5: continue
+                if not any(k in rows[0].get_text(" ", strip=True).lower() for k in ["объявления", "организатор", "название"]): continue
+                for row in rows[1:]:
+                    cells = row.find_all("td")
+                    if len(cells) < 5: continue
+                    link = row.find("a", href=True); href = link.get("href", "") if link else ""
+                    nm = re.search(r"anno/(\d+)", href) or re.search(r"view/(\d+)", href)
+                    nid = nm.group(1) if nm else cells[0].get_text(strip=True)
+                    org = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                    title = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+                    method = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                    ds = cells[6].get_text(strip=True) if len(cells) > 6 else ""
+                    de = cells[7].get_text(strip=True) if len(cells) > 7 else ""
+                    if ds and not in_window(ds): continue
+                    if href and not href.startswith("http"): href = f"https://eprocurement.gov.tj{href}"
+                    out.append(normalize({"source": "eprocurement.gov.tj", "tender_id": str(nid), "title_ru": title, "title_tj": title, "title_original": title, "donor": "Госзакупки РТ", "funding_type": "State Budget", "country": "Tajikistan", "organization": org, "procurement_method": method, "publication_date": ds, "submission_deadline": de, "source_url": href or "https://eprocurement.gov.tj/ru/searchanno", "language": "Russian/Tajik"}))
+                break
+            await browser.close()
+    except Exception as e: print(f"  err: {e}")
+    print(f"  eproc: {len(out)}"); return out
+
