@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import asyncio, re, json, time
+"""
+Парсер тендеров с донорским финансированием — Таджикистан.
+Собирает тендеры из 6 источников, категоризирует, переводит заголовки
+(best-effort) и генерирует Excel/CSV + HTML-каталог + HTML-дашборд.
+"""
+import asyncio, re, json, time, hashlib
 from datetime import datetime, date, timedelta
 from pathlib import Path
 import requests
@@ -21,164 +26,447 @@ TODAY = date.today()
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 H = {"User-Agent": UA, "Accept": "text/html,*/*", "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"}
 
-CAT_RU = {'Software / IT Development': 'IT-разработка', 'IT Equipment Supply': 'Поставка IT-оборудования', 'Telecom / Network': 'Телеком/Сеть', 'Geo-spatial / Digital Agriculture': 'Геоданные/Цифровое с/х', 'Fintech / Digital Payments': 'Финтех/Цифровые платежи', 'E-Government / E-Procurement': 'Электронное правительство', 'Lab Equipment': 'Лабораторное оборудование', 'Power / Electrical': 'Электрооборудование', 'Machinery / Vehicles': 'Техника/Спецтранспорт', 'Vehicles': 'Транспорт', 'Furniture': 'Мебель', 'Consulting': 'Консалтинг', 'Training / TA': 'Обучение/Техпомощь', 'Studies / Audit': 'Исследования/Аудит', 'Construction / Civil': 'Строительство', 'Infrastructure / Roads': 'Инфраструктура/Дороги', 'Healthcare / Medical': 'Здравоохранение', 'Other Services': 'Прочие услуги'}
-DONOR_RU = {'World Bank (IDA/IBRD)': 'Всемирный банк', 'World Bank (SRASP)': 'Всемирный банк (SRASP)', 'Агрегатор госзакупок РТ': 'Госзакупки РТ', 'Госкоминвест РТ': 'Госкоминвест РТ', 'UNDP': 'ПРООН'}
-WB_PRJ = {'Tajikistan Digital Foundations Project': 'Цифровые основы Таджикистана', 'Public Finance Management Modernization Project 2': 'Модернизация госфинансов', 'Social Protection Modernization and Economic Inclusion Project': 'Модернизация соцзащиты', 'Strengthening Resilience of the Agriculture Sector Project': 'Укрепление с/х (SRASP)', 'Tajikistan Water Supply and Sanitation Investment Project': 'Водоснабжение и канализация', 'Tajikistan Millati Solim Project': 'Здоровая нация', 'Tajikistan Strengthening Water and Irrigation Management Project': 'Управление водой', 'Tajikistan Preparedness and Resilience to Disasters Project': 'Готовность к ЧС', 'Early Childhood Development': 'Раннее развитие детей', 'Modernizing the National Statistical System in Tajikistan': 'Модернизация статистики', 'Rural Electrification Project': 'Электрификация сёл', 'Financial and Private Sector Development Project': 'Развитие финансового сектора'}
+# Сколько раз повторять сетевой запрос при ошибке, и с какой паузой (backoff)
+RETRIES = 3
+RETRY_BACKOFF = 2.0
+
+# Сводка по источникам: сколько записей собрано / были ли ошибки — печатается в конце
+SOURCE_SUMMARY = {}
+
+# ---------------------------------------------------------------------------
+# СЛОВАРИ ПЕРЕВОДОВ
+# ---------------------------------------------------------------------------
+
+CAT_RU = {
+    'Software / IT Development': 'IT-разработка',
+    'IT Equipment Supply': 'Поставка IT-оборудования',
+    'Telecom / Network': 'Телеком/Сеть',
+    'Geo-spatial / Digital Agriculture': 'Геоданные/Цифровое с/х',
+    'Fintech / Digital Payments': 'Финтех/Цифровые платежи',
+    'E-Government / E-Procurement': 'Электронное правительство',
+    'Lab Equipment': 'Лабораторное оборудование',
+    'Power / Electrical': 'Электрооборудование',
+    'Machinery / Vehicles': 'Техника/Спецтранспорт',
+    'Vehicles': 'Транспорт',
+    'Furniture': 'Мебель',
+    'Consulting': 'Консалтинг',
+    'Training / TA': 'Обучение/Техпомощь',
+    'Studies / Audit': 'Исследования/Аудит',
+    'Construction / Civil': 'Строительство',
+    'Infrastructure / Roads': 'Инфраструктура/Дороги',
+    'Healthcare / Medical': 'Здравоохранение',
+    'Other Services': 'Прочие услуги',
+}
+DONOR_RU = {
+    'World Bank (IDA/IBRD)': 'Всемирный банк',
+    'World Bank (SRASP)': 'Всемирный банк (SRASP)',
+    'Агрегатор госзакупок РТ': 'Госзакупки РТ',
+    'Госкоминвест РТ': 'Госкоминвест РТ',
+    'UNDP': 'ПРООН',
+}
+WB_PRJ = {
+    'Tajikistan Digital Foundations Project': 'Цифровые основы Таджикистана',
+    'Public Finance Management Modernization Project 2': 'Модернизация госфинансов',
+    'Social Protection Modernization and Economic Inclusion Project': 'Модернизация соцзащиты',
+    'Strengthening Resilience of the Agriculture Sector Project': 'Укрепление с/х (SRASP)',
+    'Tajikistan Water Supply and Sanitation Investment Project': 'Водоснабжение и канализация',
+    'Tajikistan Millati Solim Project': 'Здоровая нация',
+    'Tajikistan Strengthening Water and Irrigation Management Project': 'Управление водой',
+    'Tajikistan Preparedness and Resilience to Disasters Project': 'Готовность к ЧС',
+    'Early Childhood Development': 'Раннее развитие детей',
+    'Modernizing the National Statistical System in Tajikistan': 'Модернизация статистики',
+    'Rural Electrification Project': 'Электрификация сёл',
+    'Financial and Private Sector Development Project': 'Развитие финансового сектора',
+}
+
+# Ключевые слова для автокатегоризации (ищутся в title+description, регистронезависимо)
+# Порядок важен: первое совпадение побеждает, поэтому более специфичные категории — выше.
+CATEGORY_RULES = [
+    ('Fintech / Digital Payments', ['bank id', 'p2g', 'b2g', 'fintech', 'digital payment', 'e-payment', 'платеж']),
+    ('Geo-spatial / Digital Agriculture', ['digital soil', 'amis remote', 'remote sensing', 'geo-spatial', 'geospatial', 'gis ', 'digital agriculture', 'цифровое сельское']),
+    ('E-Government / E-Procurement', ['e-procurement', 'e-government', 'e-gov', 'edms', 'electronic document management', 'электронное правительство']),
+    ('Telecom / Network', ['telecom', 'network cabling', 'fiber', 'broadband', 'wi-fi', 'wifi', 'структурированн', 'локальн', 'lan ', 'wan ']),
+    ('Software / IT Development', ['software', 'application development', 'platform', 'portal', 'database', 'веб-сайт', 'веб сайт', 'информационн', 'программн', 'разработка сайта', 'разработка приложения']),
+    ('IT Equipment Supply', ['computer', 'server', 'laptop', 'monoblock', 'моноблок', 'printer', 'scanner', 'ноутбук', 'сервер', 'принтер', 'сканер', 'компьютер', 'ит-оборудование', 'it equipment']),
+    ('Lab Equipment', ['lab equipment', 'laboratory', 'лабораторн']),
+    ('Power / Electrical', ['electrical', 'power supply', 'generator', 'solar', 'электрооборудование', 'генератор', 'солнечн']),
+    ('Machinery / Vehicles', ['machinery', 'excavator', 'tractor', 'спецтехника', 'экскаватор', 'трактор']),
+    ('Vehicles', ['vehicle', 'automobile', 'car ', 'truck', 'автомобиль', 'транспортн средств']),
+    ('Furniture', ['furniture', 'мебель']),
+    ('Training / TA', ['training', 'technical assistance', 'capacity building', 'обучение', 'техническая помощь', 'повышение квалификации']),
+    ('Studies / Audit', ['study', 'audit', 'assessment', 'исследован', 'аудит', 'оценка']),
+    ('Consulting', ['consulting', 'consultant', 'консалтинг', 'консультант', 'услуги консульт']),
+    ('Construction / Civil', ['construction', 'civil works', 'строительств', 'строительно-монтажн']),
+    ('Infrastructure / Roads', ['road', 'infrastructure', 'дорог', 'инфраструктур']),
+    ('Healthcare / Medical', ['medical', 'health', 'hospital', 'медицинск', 'здравоохран', 'больниц']),
+]
+
+def categorize(title, description=""):
+    """Определяет категорию тендера по ключевым словам в названии+описании."""
+    text = f"{title or ''} {description or ''}".lower()
+    for cat, keywords in CATEGORY_RULES:
+        for kw in keywords:
+            if kw in text:
+                return cat
+    return 'Other Services'
+
+# ---------------------------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ---------------------------------------------------------------------------
 
 def parse_d(s):
-    if not s: return ""
+    """Парсит дату из строки в разных форматах -> 'YYYY-MM-DD' (или исходную строку, если не смогли)."""
+    if not s:
+        return ""
     s = str(s).strip()
-    for f in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%b-%Y", "%d.%m.%Y"]:
-        try: return datetime.strptime(s, f).strftime("%Y-%m-%d")
-        except: pass
-    try: return dateparser.parse(s).strftime("%Y-%m-%d")
-    except: return s
+    if not s:
+        return ""
+    for f in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%b-%Y", "%d.%m.%Y", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"]:
+        try:
+            return datetime.strptime(s, f).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    try:
+        # dayfirst=True — важно для форматов dd.mm.yyyy, характерных для РТ-источников,
+        # чтобы pandas/dateutil не перепутали день и месяц
+        return dateparser.parse(s, dayfirst=True).strftime("%Y-%m-%d")
+    except Exception:
+        return s
 
 def in_win(s):
-    if not s: return True
-    try: return datetime.strptime(parse_d(s), "%Y-%m-%d") >= CUTOFF
-    except: return True
+    if not s:
+        return True
+    try:
+        return datetime.strptime(parse_d(s), "%Y-%m-%d") >= CUTOFF
+    except Exception:
+        return True
 
 def title_ru(row):
+    """Выбирает лучший доступный заголовок на русском; если нет — берёт EN/оригинал."""
     for k, v in WB_PRJ.items():
-        if pd.notna(row.get('title_en', '')) and k in str(row.get('title_en', '')): return v
+        if pd.notna(row.get('title_en', '')) and k in str(row.get('title_en', '')):
+            return v
     for col in ['title_tj', 'title_ru', 'title_en', 'title_original']:
         v = row.get(col, '')
-        if pd.notna(v) and str(v).strip() and str(v).strip() != 'nan': return str(v).strip()
+        if pd.notna(v) and str(v).strip() and str(v).strip() != 'nan':
+            return str(v).strip()
     return '(без названия)'
 
+def make_stable_id(*parts):
+    """Стабильный короткий хэш из набора строк — используется как tender_id,
+    когда источник не даёт естественный уникальный идентификатор
+    (иначе разные записи схлопнутся в дедупе по одинаковому ключу)."""
+    raw = "|".join(str(p or "").strip() for p in parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
 def norm(raw):
-    base = {k: raw.get(k, "") for k in ["source", "tender_id", "title_en", "title_ru", "title_tj", "title_original", "donor", "funding_type", "country", "region", "organization", "category", "publication_date", "submission_deadline", "procurement_method", "eligibility", "description", "documents_url", "contact_name", "contact_email", "contact_phone", "source_url", "language"]}
+    base = {k: raw.get(k, "") for k in [
+        "source", "tender_id", "title_en", "title_ru", "title_tj", "title_original",
+        "donor", "funding_type", "country", "region", "organization", "category",
+        "publication_date", "submission_deadline", "procurement_method", "eligibility",
+        "description", "documents_url", "contact_name", "contact_email", "contact_phone",
+        "source_url", "language",
+    ]}
+    if not base.get("category"):
+        base["category"] = categorize(base.get("title_en") or base.get("title_original") or base.get("title_ru") or base.get("title_tj"), base.get("description"))
     base["scraped_at"] = NOW.isoformat(timespec="seconds")
     return base
 
+_TRANSLATE_CACHE = {}
+
+def translate_en_ru(text, timeout=6):
+    """Best-effort перевод короткого EN-текста на RU через бесплатный MyMemory API.
+    Не критично для работы парсера: при любой ошибке/недоступности сети просто
+    возвращает None, и вызывающий код использует оригинал. Кэшируется в рамках
+    одного запуска, чтобы не дублировать запросы для одинаковых заголовков."""
+    if not text or not text.strip():
+        return None
+    text = text.strip()[:480]  # у бесплатного API есть лимит на длину строки
+    if text in _TRANSLATE_CACHE:
+        return _TRANSLATE_CACHE[text]
+    try:
+        r = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text, "langpair": "en|ru"},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
+        translated = (data.get("responseData") or {}).get("translatedText")
+        if translated and translated.strip() and translated.strip().lower() != text.lower():
+            _TRANSLATE_CACHE[text] = translated.strip()
+            return translated.strip()
+    except Exception:
+        pass
+    _TRANSLATE_CACHE[text] = None
+    return None
+
+def http_get(url, **kwargs):
+    """requests.get с ретраями и экспоненциальным backoff, форсирует utf-8."""
+    kwargs.setdefault("headers", H)
+    kwargs.setdefault("timeout", 30)
+    last_exc = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(url, **kwargs)
+            r.raise_for_status()
+            if not r.encoding or r.encoding.lower() == "iso-8859-1":
+                r.encoding = r.apparent_encoding or "utf-8"
+            return r
+        except Exception as e:
+            last_exc = e
+            if attempt < RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt)
+    raise last_exc
+
+# ---------------------------------------------------------------------------
+# ИСТОЧНИКИ
+# ---------------------------------------------------------------------------
+
+def _report(name, count, ok=True):
+    SOURCE_SUMMARY[name] = {"count": count, "ok": ok}
+    print(f"  {name}: {count}" + ("" if ok else "  ⚠ ЗАВЕРШЁН С ОШИБКОЙ"))
+
 def f_wb():
-    print("[1/6] World Bank..."); out = []; seen = set(); off = 0
+    print("[1/6] World Bank...")
+    out = []; seen = set(); off = 0
+    ok = True
     for _ in range(50):
         try:
-            r = requests.get("https://search.worldbank.org/api/v2/procnotices", params={"format": "json", "qterm": "Tajikistan", "rows": 100, "os": off}, headers=H, timeout=30)
-            r.raise_for_status()
+            r = http_get(
+                "https://search.worldbank.org/api/v2/procnotices",
+                params={"format": "json", "qterm": "Tajikistan", "rows": 100, "os": off},
+                timeout=30,
+            )
             ns = r.json().get("procnotices", [])
-            if not ns: break
+            if not ns:
+                break
             for n in ns:
-                if n.get("project_ctry_name") != "Tajikistan": continue
+                if n.get("project_ctry_name") != "Tajikistan":
+                    continue
                 nid = n.get("id", "")
-                if nid in seen: continue
+                if nid in seen:
+                    continue
                 seen.add(nid)
-                if not in_win(parse_d(n.get("noticedate", ""))): continue
-                out.append(norm({"source": "World Bank", "tender_id": nid, "title_en": n.get("project_name", ""), "title_original": n.get("project_name", ""), "donor": "World Bank (IDA/IBRD)", "funding_type": "Loan/Credit/Grant", "country": "Tajikistan", "organization": n.get("contact_organization", ""), "category": n.get("procurement_group", ""), "submission_deadline": (str(n.get("submission_deadline_date", ""))[:10] + " " + str(n.get("submission_deadline_time", ""))).strip(), "publication_date": parse_d(n.get("noticedate", "")), "procurement_method": n.get("procurement_method_name", ""), "description": n.get("bid_description", ""), "documents_url": f"https://projects.worldbank.org/en/projects-operations/procurement-detail/{nid}", "contact_name": n.get("contact_name", ""), "contact_email": n.get("contact_email", ""), "contact_phone": n.get("contact_phone_no", ""), "source_url": f"https://projects.worldbank.org/en/projects-operations/procurement-detail/{nid}", "language": n.get("notice_lang_name", "English"), "eligibility": "World Bank Procurement Regulations"}))
+                if not in_win(parse_d(n.get("noticedate", ""))):
+                    continue
+                title_en = n.get("project_name", "")
+                out.append(norm({
+                    "source": "World Bank", "tender_id": nid, "title_en": title_en,
+                    "title_original": title_en, "donor": "World Bank (IDA/IBRD)",
+                    "funding_type": "Loan/Credit/Grant", "country": "Tajikistan",
+                    "organization": n.get("contact_organization", ""),
+                    "category": "",  # категория WB API (procurement_group) слишком «сырая» —
+                                      # доверяем автокатегоризации по названию/описанию (см. norm())
+                    "submission_deadline": (str(n.get("submission_deadline_date", ""))[:10] + " " + str(n.get("submission_deadline_time", ""))).strip(),
+                    "publication_date": parse_d(n.get("noticedate", "")),
+                    "procurement_method": n.get("procurement_method_name", ""),
+                    "description": n.get("bid_description", ""),
+                    "documents_url": f"https://projects.worldbank.org/en/projects-operations/procurement-detail/{nid}",
+                    "contact_name": n.get("contact_name", ""),
+                    "contact_email": n.get("contact_email", ""),
+                    "contact_phone": n.get("contact_phone_no", ""),
+                    "source_url": f"https://projects.worldbank.org/en/projects-operations/procurement-detail/{nid}",
+                    "language": n.get("notice_lang_name", "English"),
+                    "eligibility": "World Bank Procurement Regulations",
+                }))
             off += 100
             time.sleep(0.3)
-        except Exception as e: print(f"  err: {e}"); break
-    print(f"  WB: {len(out)}"); return out
+        except Exception as e:
+            print(f"  err: {e}")
+            ok = False
+            break
+    _report("World Bank", len(out), ok)
+    return out
 
 def f_undp():
-    print("[2/6] UNDP..."); out = []
+    print("[2/6] UNDP...")
+    out = []; ok = True
     try:
-        r = requests.get("https://procurement-notices.undp.org/search.cfm", params={"displayed_record": 1000, "start": 0}, headers=H, timeout=60)
-        r.raise_for_status()
+        r = http_get(
+            "https://procurement-notices.undp.org/search.cfm",
+            params={"displayed_record": 1000, "start": 0}, timeout=60,
+        )
         soup = BeautifulSoup(r.text, "lxml")
         for row in soup.find_all("a", class_=re.compile(r"vacanciesTable.*row", re.I)):
             text = row.get_text(" ", strip=True)
-            if "TAJIK" not in text.upper(): continue
+            if "TAJIK" not in text.upper():
+                continue
             href = row.get("href", "")
-            if href and not href.startswith("http"): href = f"https://procurement-notices.undp.org/{href}"
+            if href and not href.startswith("http"):
+                href = f"https://procurement-notices.undp.org/{href}"
             tm = re.search(r"Title\s*(.+?)\s*Ref No", text); title = tm.group(1).strip() if tm else ""
             rm = re.search(r"Ref No\s*(\S+)", text); ref = rm.group(1) if rm else ""
             pm = re.search(r"Posted\s*(\d{1,2}-\w+-\d+)", text); posted = parse_d(pm.group(1)) if pm else ""
             dm = re.search(r"Deadline\s*(.+?)(?:\s*Posted|$)", text); dl = dm.group(1).strip() if dm else ""
             tym = re.search(r"Procurement Method\s*(.+?)(?:\s*UNDP|$)", text) or re.search(r"Type\s*(.+?)(?:\s*UNDP|$)", text)
             ptype = tym.group(1).strip() if tym else ""
-            out.append(norm({"source": "UNDP", "tender_id": ref, "title_en": title, "title_original": title, "donor": "UNDP", "funding_type": "Grant", "country": "Tajikistan", "organization": "UNDP Tajikistan", "publication_date": posted, "procurement_method": ptype, "source_url": href, "description": text[:1500], "language": "English"}))
-    except Exception as e: print(f"  err: {e}")
-    print(f"  UNDP: {len(out)}"); return out
+            # ref может отсутствовать/повторяться — на всякий случай подстрахуемся хэшем от href+title
+            tender_id = ref or make_stable_id(href, title)
+            out.append(norm({
+                "source": "UNDP", "tender_id": tender_id, "title_en": title, "title_original": title,
+                "donor": "UNDP", "funding_type": "Grant", "country": "Tajikistan",
+                "organization": "UNDP Tajikistan", "publication_date": posted,
+                "submission_deadline": dl, "procurement_method": ptype,
+                "source_url": href or f"https://procurement-notices.undp.org/#{tender_id}",
+                "description": text[:1500], "language": "English",
+            }))
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("UNDP", len(out), ok)
+    return out
 
 def f_inv():
-    print("[3/6] investcom.tj..."); out = []
+    print("[3/6] investcom.tj...")
+    out = []; ok = True
     try:
-        r = requests.get("https://investcom.tj/tenders.html", headers=H, timeout=30)
-        r.raise_for_status()
+        r = http_get("https://investcom.tj/tenders.html", timeout=30)
         soup = BeautifulSoup(r.text, "lxml")
         table = soup.find("table")
-        if not table: return out
+        if not table:
+            _report("investcom.tj", 0, True)
+            return out
         for row in table.find_all("tr")[1:]:
             cells = row.find_all("td")
-            if len(cells) < 5: continue
-            org = cells[0].get_text(strip=True); proj = cells[1].get_text(strip=True); subj = cells[2].get_text(strip=True)
+            if len(cells) < 5:
+                continue
+            org = cells[0].get_text(strip=True)
+            proj = cells[1].get_text(strip=True)
+            subj = cells[2].get_text(strip=True)
             dl_raw = cells[3].get_text(strip=True)
-            doc = cells[4].find("a", href=True); doc_url = doc["href"] if doc else ""
-            if not in_win(dl_raw): continue
-            out.append(norm({"source": "investcom.tj", "title_tj": subj, "title_ru": subj, "title_original": subj, "donor": "Госкоминвест РТ", "funding_type": "Grant/State", "country": "Tajikistan", "organization": org, "description": proj, "submission_deadline": dl_raw, "documents_url": doc_url, "source_url": "https://investcom.tj/tenders.html", "language": "Tajik/Russian"}))
-    except Exception as e: print(f"  err: {e}")
-    print(f"  inv: {len(out)}"); return out
+            doc = cells[4].find("a", href=True)
+            doc_url = doc["href"] if doc else ""
+            if doc_url and not doc_url.startswith("http"):
+                doc_url = f"https://investcom.tj/{doc_url.lstrip('/')}"
+            if not in_win(dl_raw):
+                continue
+            # ФИКС P0: раньше source_url был одинаковым (страница списка) для ВСЕХ строк,
+            # из-за чего дедуп по (source, tender_id, source_url) схлопывал 16-18 разных
+            # тендеров в 1. Теперь используем ссылку на документ, если она есть, а если нет —
+            # стабильный хэш от содержимого строки, чтобы каждая запись была уникальной.
+            tender_id = make_stable_id(org, proj, subj, dl_raw)
+            source_url = doc_url or f"https://investcom.tj/tenders.html#{tender_id}"
+            out.append(norm({
+                "source": "investcom.tj", "tender_id": tender_id,
+                "title_tj": subj, "title_ru": subj, "title_original": subj,
+                "donor": "Госкоминвест РТ", "funding_type": "Grant/State",
+                "country": "Tajikistan", "organization": org, "description": proj,
+                "submission_deadline": dl_raw, "documents_url": doc_url,
+                "source_url": source_url, "language": "Tajik/Russian",
+            }))
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("investcom.tj", len(out), ok)
+    return out
 
 def f_aed():
-    print("[4/6] aedpmu.tj..."); out = []
+    print("[4/6] aedpmu.tj...")
+    out = []; ok = True
     try:
         for pg in range(1, 6):
             url = "https://aedpmu.tj/en/category/obyavlenie/tendery/" + (f"page/{pg}/" if pg > 1 else "")
-            r = requests.get(url, headers=H, timeout=30)
-            if r.status_code != 200: break
+            try:
+                r = http_get(url, timeout=30)
+            except Exception:
+                break
             soup = BeautifulSoup(r.text, "lxml")
             arts = soup.find_all("article")
-            if not arts: break
+            if not arts:
+                break
             for art in arts:
                 te = art.find("time"); pd_str = te.get("datetime", "") if te else ""
                 if not pd_str:
                     dm = re.search(r"(\d{1,2}\s+\w+\s+\d{4})", art.get_text())
                     pd_str = dm.group(1) if dm else ""
-                if not in_win(pd_str): continue
+                if not in_win(pd_str):
+                    continue
                 te2 = art.find(["h2", "h3", "h1"])
-                if not te2: continue
+                if not te2:
+                    continue
                 lnk = te2.find("a", href=True) or art.find("a", href=True)
-                if not lnk: continue
+                if not lnk:
+                    continue
                 title = te2.get_text(strip=True); url_full = lnk["href"]
                 m = re.search(r"/(\d+)/?$", url_full)
-                out.append(norm({"source": "aedpmu.tj", "tender_id": m.group(1) if m else "", "title_en": title, "title_original": title, "donor": "World Bank (SRASP)", "funding_type": "Grant", "country": "Tajikistan", "organization": "AED PMU", "category": "IT/Agriculture", "publication_date": parse_d(pd_str), "source_url": url_full, "language": "English", "eligibility": "World Bank Procurement Regulations"}))
-    except Exception as e: print(f"  err: {e}")
-    print(f"  aed: {len(out)}"); return out
+                tender_id = m.group(1) if m else make_stable_id(url_full, title)
+                out.append(norm({
+                    "source": "aedpmu.tj", "tender_id": tender_id, "title_en": title,
+                    "title_original": title, "donor": "World Bank (SRASP)", "funding_type": "Grant",
+                    "country": "Tajikistan", "organization": "AED PMU",
+                    "category": "",  # прежде было жёстко "IT/Agriculture" — теперь категоризируем по тексту
+                    "publication_date": parse_d(pd_str), "source_url": url_full,
+                    "language": "English", "eligibility": "World Bank Procurement Regulations",
+                }))
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("aedpmu.tj", len(out), ok)
+    return out
 
 def f_tj():
-    print("[5/6] tenders.tj..."); out = []
+    print("[5/6] tenders.tj...")
+    out = []; ok = True
     base = "https://www.tenders.tj"
     try:
         for pg in range(1, 4):
-            r = requests.get(f"{base}/index.php?do=poisk&page={pg}", headers=H, timeout=30)
-            if r.status_code != 200: break
+            try:
+                r = http_get(f"{base}/index.php?do=poisk&page={pg}", timeout=30)
+            except Exception:
+                break
             soup = BeautifulSoup(r.text, "lxml")
             for it in soup.find_all("a", href=re.compile(r"/procurement/\d+\.html")):
                 href = it.get("href", ""); title = it.get_text(" ", strip=True)
-                if not title or len(title) < 5: continue
-                if not href.startswith("http"): href = f"{base}{href}"
+                if not title or len(title) < 5:
+                    continue
+                if not href.startswith("http"):
+                    href = f"{base}{href}"
                 m = re.search(r"/procurement/(\d+)\.html", href)
-                out.append(norm({"source": "tenders.tj", "tender_id": m.group(1) if m else "", "title_ru": title, "title_tj": title, "title_original": title, "donor": "Агрегатор госзакупок РТ", "funding_type": "State/Donor", "country": "Tajikistan", "source_url": href, "language": "Russian/Tajik"}))
+                out.append(norm({
+                    "source": "tenders.tj", "tender_id": m.group(1) if m else make_stable_id(href, title),
+                    "title_ru": title, "title_tj": title, "title_original": title,
+                    "donor": "Агрегатор госзакупок РТ", "funding_type": "State/Donor",
+                    "country": "Tajikistan", "source_url": href, "language": "Russian/Tajik",
+                }))
             time.sleep(0.3)
         for rec in out[:30]:
             try:
-                d = requests.get(rec["source_url"], headers=H, timeout=15)
-                if d.status_code == 200:
-                    s = BeautifulSoup(d.text, "lxml"); txt = s.get_text("\n", strip=True)
-                    m1 = re.search(r"Дата публикации:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", txt)
-                    if m1: rec["publication_date"] = parse_d(m1.group(1))
-                    m2 = re.search(r"Крайний срок / Deadline:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", txt)
-                    if m2: rec["submission_deadline"] = m2.group(1)
-                    m3 = re.search(r"Организатор:\s*([^\n]+)", txt)
-                    if m3: rec["organization"] = m3.group(1).strip()
-                    m4 = re.search(r"Отрасль:\s*([^\n]+)", txt)
-                    if m4: rec["category"] = m4.group(1).strip()
-                    m5 = re.search(r"Контактный E-mail:\s*([^\n]+)", txt)
-                    if m5: rec["contact_email"] = m5.group(1).strip()
-            except: pass
+                d = http_get(rec["source_url"], timeout=15)
+                s = BeautifulSoup(d.text, "lxml"); txt = s.get_text("\n", strip=True)
+                m1 = re.search(r"Дата публикации:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", txt)
+                if m1: rec["publication_date"] = parse_d(m1.group(1))
+                m2 = re.search(r"Крайний срок / Deadline:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", txt)
+                if m2: rec["submission_deadline"] = m2.group(1)
+                m3 = re.search(r"Организатор:\s*([^\n]+)", txt)
+                if m3: rec["organization"] = m3.group(1).strip()
+                m4 = re.search(r"Отрасль:\s*([^\n]+)", txt)
+                if m4: rec["category_raw_tj"] = m4.group(1).strip()
+                m5 = re.search(r"Контактный E-mail:\s*([^\n]+)", txt)
+                if m5: rec["contact_email"] = m5.group(1).strip()
+                m6 = re.search(r"Контактный телефон:\s*([^\n]+)", txt)
+                if m6: rec["contact_phone"] = m6.group(1).strip()
+                m7 = re.search(r"Область реализации проекта:\s*([^\n]+)", txt)
+                if m7: rec["region"] = m7.group(1).strip()
+                m8 = re.search(r"Описание:\s*([^\n]+)", txt)
+                if m8: rec["description"] = m8.group(1).strip()
+                # если категория ещё не определено осмысленно — пересчитываем с учётом деталей страницы
+                if rec.get("category") == "Other Services":
+                    rec["category"] = categorize(rec.get("title_ru", ""), rec.get("description", ""))
+            except Exception:
+                pass
             time.sleep(0.2)
-    except Exception as e: print(f"  err: {e}")
-    print(f"  tenders: {len(out)}"); return out
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("tenders.tj", len(out), ok)
+    return out
 
 async def f_eproc():
-    print("[6/6] eprocurement.gov.tj..."); out = []
-    if not HAS_PW: return out
+    print("[6/6] eprocurement.gov.tj...")
+    out = []; ok = True
+    if not HAS_PW:
+        _report("eprocurement.gov.tj", 0, False)
+        return out
     try:
         async with async_playwright() as p:
-            b = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+            b = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             ctx = await b.new_context(user_agent=UA)
             page = await ctx.new_page()
             await page.goto("https://eprocurement.gov.tj/ru/searchanno", wait_until="domcontentloaded", timeout=90000)
@@ -187,91 +475,219 @@ async def f_eproc():
                 await page.fill('input[name="date_start"]', CUTOFF.strftime("%Y-%m-%d %H:%M:%S"))
                 await page.fill('input[name="date_end"]', NOW.strftime("%Y-%m-%d %H:%M:%S"))
                 sb = await page.query_selector_all('button[type="submit"], input[type="submit"]')
-                if sb: await sb[0].click(); await page.wait_for_timeout(5000)
-            except: pass
+                if sb:
+                    await sb[0].click()
+                    await page.wait_for_timeout(5000)
+            except Exception:
+                pass
             html = await page.content(); soup = BeautifulSoup(html, "lxml")
             for t in soup.find_all("table"):
                 rows = t.find_all("tr")
-                if len(rows) < 5: continue
-                hdr = rows[0].get_text(" ", strip=True).lower()
-                if "объявления" not in hdr and "название" not in hdr: continue
+                if len(rows) < 5:
+                    continue
+                header_cells = rows[0].find_all(["th", "td"])
+                hdr_texts = [c.get_text(" ", strip=True).lower() for c in header_cells]
+                hdr_joined = " ".join(hdr_texts)
+                if "объявления" not in hdr_joined and "название" not in hdr_joined:
+                    continue
+
+                # ФИКС: раньше индексы колонок (org=1, title=3, deadline=7) были жёстко зашиты.
+                # Теперь пытаемся определить их по заголовку таблицы; если не получилось —
+                # откатываемся на старые индексы как fallback, но это уже осознанный запасной путь.
+                def find_col(keywords, default):
+                    for i, htxt in enumerate(hdr_texts):
+                        if any(k in htxt for k in keywords):
+                            return i
+                    return default
+
+                idx_org = find_col(["заказчик", "организатор"], 1)
+                idx_title = find_col(["название", "наименование", "предмет"], 3)
+                idx_deadline = find_col(["окончания", "дата окончания", "срок"], 7)
+
                 for row in rows[1:]:
                     cells = row.find_all("td")
-                    if len(cells) < 5: continue
+                    if len(cells) < 3:
+                        continue
                     link = row.find("a", href=True); href = link.get("href", "") if link else ""
-                    org = cells[1].get_text(strip=True)
-                    title = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-                    de = cells[7].get_text(strip=True) if len(cells) > 7 else ""
-                    if href and not href.startswith("http"): href = f"https://eprocurement.gov.tj{href}"
-                    out.append(norm({"source": "eprocurement.gov.tj", "title_ru": title, "title_tj": title, "title_original": title, "donor": "Госзакупки РТ", "funding_type": "State Budget", "country": "Tajikistan", "organization": org, "submission_deadline": de, "source_url": href or "https://eprocurement.gov.tj/ru/searchanno", "language": "Russian/Tajik"}))
+                    org = cells[idx_org].get_text(strip=True) if idx_org < len(cells) else ""
+                    title = cells[idx_title].get_text(strip=True) if idx_title < len(cells) else ""
+                    de = cells[idx_deadline].get_text(strip=True) if idx_deadline < len(cells) else ""
+                    if href and not href.startswith("http"):
+                        href = f"https://eprocurement.gov.tj{href}"
+                    # ФИКС P0 (вторично): если ссылки нет, раньше все такие записи получали
+                    # одинаковый source_url (адрес поиска) и схлопывались в дедупе.
+                    tender_id = make_stable_id(org, title, de)
+                    source_url = href or f"https://eprocurement.gov.tj/ru/searchanno#{tender_id}"
+                    out.append(norm({
+                        "source": "eprocurement.gov.tj", "tender_id": tender_id,
+                        "title_ru": title, "title_tj": title, "title_original": title,
+                        "donor": "Госзакупки РТ", "funding_type": "State Budget",
+                        "country": "Tajikistan", "organization": org,
+                        "submission_deadline": de, "source_url": source_url,
+                        "language": "Russian/Tajik",
+                    }))
                 break
             await b.close()
-    except Exception as e: print(f"  err: {e}")
-    print(f"  eproc: {len(out)}"); return out
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("eprocurement.gov.tj", len(out), ok)
+    return out
+
+# ---------------------------------------------------------------------------
+# СБОРКА ВЫХОДНЫХ ФАЙЛОВ
+# ---------------------------------------------------------------------------
+
+def safe_json_embed(obj):
+    """json.dumps + экранирование '<' — иначе если в спарсенном тексте случайно
+    встретится подстрока '</script>', она преждевременно оборвёт тег <script>
+    в HTML-шаблоне и сломает страницу."""
+    return json.dumps(obj, ensure_ascii=False, default=str).replace("<", "\\u003c")
 
 def b_excel(records):
-    print("Excel..."); df = pd.DataFrame(records)
-    cols = ["source", "tender_id", "title_en", "title_ru", "title_tj", "title_original", "donor", "funding_type", "country", "region", "organization", "category", "publication_date", "submission_deadline", "procurement_method", "eligibility", "description", "documents_url", "contact_name", "contact_email", "contact_phone", "source_url", "language", "scraped_at"]
+    print("Excel...")
+    df = pd.DataFrame(records)
+    cols = ["source", "tender_id", "title_en", "title_ru", "title_tj", "title_original",
+            "donor", "funding_type", "country", "region", "organization", "category",
+            "publication_date", "submission_deadline", "procurement_method", "eligibility",
+            "description", "documents_url", "contact_name", "contact_email", "contact_phone",
+            "source_url", "language", "scraped_at"]
     df = df[[c for c in cols if c in df.columns]]
     df.to_csv(OUT / f"tenders_tj_{TODAY.isoformat()}.csv", index=False, encoding="utf-8-sig")
     df.to_excel(OUT / f"tenders_tj_{TODAY.isoformat()}.xlsx", index=False, engine="openpyxl")
-    print(f"  -> {len(df)}"); return df
+    print(f"  -> {len(df)}")
+    return df
 
 def b_cat(df):
-    print("Catalog..."); df = df.copy()
-    df['title_main'] = df.apply(title_ru, axis=1)
+    print("Catalog...")
+    df = df.copy()
+
+    # Best-effort перевод заголовков, которые остались только на английском
+    # (после title_ru() ниже используется как fallback-источник текста).
+    def translate_row_title(row):
+        best = title_ru(row)
+        # Если результат состоит преимущественно из латиницы — пробуем перевести
+        if best and best != '(без названия)' and not re.search(r'[а-яё]', best, re.I):
+            tr = translate_en_ru(best)
+            if tr:
+                return tr
+        return best
+
+    df['title_main'] = df.apply(translate_row_title, axis=1)
     df['cat_ru'] = df['category'].map(CAT_RU).fillna(df['category'])
     df['donor_ru'] = df['donor'].map(DONOR_RU).fillna(df['donor'])
-    df['dl_dt'] = pd.to_datetime(df['submission_deadline'], errors='coerce')
+
+    # ФИКС: раньше даты в submission_deadline (разные форматы от разных источников)
+    # шли напрямую в pd.to_datetime с автоопределением формата — риск перепутать
+    # день/месяц. Теперь сначала нормализуем через parse_d() (dayfirst-aware).
+    df['dl_norm'] = df['submission_deadline'].apply(parse_d)
+    df['dl_dt'] = pd.to_datetime(df['dl_norm'], errors='coerce')
+
     def st(row):
         dl = row['dl_dt']; src = row['source']
         if pd.isna(dl):
-            if src == 'World Bank': return 'Активен (ВБ)'
-            if src == 'aedpmu.tj': return 'Активен (aedpmu)'
+            if src == 'World Bank':
+                return 'Активен (ВБ)'
+            if src == 'aedpmu.tj':
+                return 'Активен (aedpmu)'
             return 'Без дедлайна'
         days = (dl - pd.Timestamp(NOW)).days
-        if days < 0: return f'Истёк ({abs(days)} дн.)'
-        if days <= 3: return f'Срочно — {days} дн.'
-        if days <= 7: return f'Скоро — {days} дн.'
-        if days <= 30: return f'Активен — {days} дн.'
+        if days < 0:
+            return f'Истёк ({abs(days)} дн.)'
+        if days <= 3:
+            return f'Срочно — {days} дн.'
+        if days <= 7:
+            return f'Скоро — {days} дн.'
+        if days <= 30:
+            return f'Активен — {days} дн.'
         return f'Долгосрочный — {days} дн.'
     df['status'] = df.apply(st, axis=1)
+
     def pr(row):
         s = row['status']
-        if 'Срочно' in s or 'Скоро' in s: return 1
-        if 'Истёк' in s: return 5
-        if 'Долгосрочный' in s: return 4
-        if 'Активен' in s: return 2
+        if 'Срочно' in s or 'Скоро' in s:
+            return 1
+        if 'Истёк' in s:
+            return 5
+        if 'Долгосрочный' in s:
+            return 4
+        if 'Активен' in s:
+            return 2
         return 3
     df['priority'] = df.apply(pr, axis=1)
     df = df.sort_values(['priority', 'publication_date'], ascending=[True, False])
+
     recs = []
     for _, r in df.iterrows():
-        recs.append({'priority': int(r['priority']), 'status': str(r['status']), 'source': str(r['source']), 'donor': str(r['donor_ru']), 'category': str(r['cat_ru']), 'title': str(r['title_main'])[:300], 'title_en': str(r.get('title_en', ''))[:300] if pd.notna(r.get('title_en', '')) else '', 'method': str(r.get('procurement_method', '')) if pd.notna(r.get('procurement_method', '')) else '—', 'organization': str(r.get('organization', '')) if pd.notna(r.get('organization', '')) else '—', 'publication_date': str(r['publication_date']) if pd.notna(r['publication_date']) else '—', 'submission_deadline': str(r['submission_deadline']) if pd.notna(r['submission_deadline']) else '—', 'description': str(r.get('description', '')) if pd.notna(r.get('description', '')) else '', 'source_url': str(r.get('source_url', '')) if pd.notna(r.get('source_url', '')) else '#'})
-    dj = json.dumps(recs, ensure_ascii=False)
-    with open(OUT / f"catalog_{TODAY.isoformat()}.html", "w") as f: f.write(CAT_HTML.replace("__DATA__", dj))
+        recs.append({
+            'priority': int(r['priority']), 'status': str(r['status']), 'source': str(r['source']),
+            'donor': str(r['donor_ru']), 'category': str(r['cat_ru']), 'title': str(r['title_main'])[:300],
+            'title_en': str(r.get('title_en', ''))[:300] if pd.notna(r.get('title_en', '')) else '',
+            'method': str(r.get('procurement_method', '')) if pd.notna(r.get('procurement_method', '')) else '—',
+            'organization': str(r.get('organization', '')) if pd.notna(r.get('organization', '')) else '—',
+            'publication_date': str(r['publication_date']) if pd.notna(r['publication_date']) else '—',
+            'submission_deadline': str(r['submission_deadline']) if pd.notna(r['submission_deadline']) else '—',
+            'description': str(r.get('description', '')) if pd.notna(r.get('description', '')) else '',
+            'source_url': str(r.get('source_url', '')) if pd.notna(r.get('source_url', '')) else '#',
+        })
+    dj = safe_json_embed(recs)
+    with open(OUT / f"catalog_{TODAY.isoformat()}.html", "w", encoding="utf-8") as f:
+        f.write(CAT_HTML.replace("__DATA__", dj))
     print(f"  -> catalog_{TODAY.isoformat()}.html")
 
 def b_dash(df):
-    print("Dashboard..."); df = df.copy()
-    df['pub_m'] = pd.to_datetime(df['publication_date'], errors='coerce').dt.to_period('M').astype(str).fillna('—')
-    s = {'total': int(len(df)), 'by_source': df.groupby('source').size().to_dict(), 'by_category': df.groupby('category').size().to_dict(), 'by_donor': df.groupby('donor').size().to_dict(), 'by_pub_month': df[df['pub_m']!='—'].groupby('pub_m').size().to_dict()}
-    dj = json.dumps(s, default=str, ensure_ascii=False)
-    with open(OUT / f"dashboard_{TODAY.isoformat()}.html", "w") as f: f.write(DASH_HTML.replace("__DATA__", dj))
+    print("Dashboard...")
+    df = df.copy()
+    df['pub_m'] = pd.to_datetime(df['publication_date'], errors='coerce').dt.to_period('M').astype(str)
+    df.loc[df['pub_m'] == 'NaT', 'pub_m'] = '—'
+    s = {
+        'total': int(len(df)),
+        'by_source': df.groupby('source').size().to_dict(),
+        'by_category': df.groupby('category').size().to_dict(),
+        'by_donor': df.groupby('donor').size().to_dict(),
+        'by_pub_month': df[df['pub_m'] != '—'].groupby('pub_m').size().to_dict(),
+    }
+    dj = safe_json_embed(s)
+    with open(OUT / f"dashboard_{TODAY.isoformat()}.html", "w", encoding="utf-8") as f:
+        f.write(DASH_HTML.replace("__DATA__", dj))
     print(f"  -> dashboard_{TODAY.isoformat()}.html")
 
 async def main():
     print(f"\n=== Run: {NOW.isoformat()} ===\n")
     all_r = []
-    all_r.extend(f_wb()); all_r.extend(f_undp()); all_r.extend(f_inv()); all_r.extend(f_aed()); all_r.extend(f_tj()); all_r.extend(await f_eproc())
+    all_r.extend(f_wb())
+    all_r.extend(f_undp())
+    all_r.extend(f_inv())
+    all_r.extend(f_aed())
+    all_r.extend(f_tj())
+    all_r.extend(await f_eproc())
+
     seen = set(); uniq = []
     for r in all_r:
         k = (r["source"], r.get("tender_id", ""), r.get("source_url", ""))
-        if k in seen: continue
+        if k in seen:
+            continue
         seen.add(k); uniq.append(r)
-    print(f"\n=== Unique: {len(uniq)} ===\n")
-    df = b_excel(uniq); b_cat(df); b_dash(df)
+    print(f"\n=== Unique: {len(uniq)} (из {len(all_r)} собранных) ===\n")
+
+    if not uniq:
+        print("⚠ ВНИМАНИЕ: не собрано ни одной записи ни из одного источника. Файлы не создаются.")
+        return
+
+    df = b_excel(uniq)
+    b_cat(df)
+    b_dash(df)
+
+    print("\n=== Сводка по источникам ===")
+    for name, info in SOURCE_SUMMARY.items():
+        flag = "OK" if info["ok"] else "ОШИБКА"
+        warn = "  <-- источник вернул 0 записей, возможно сломалась вёрстка/доступ" if info["count"] == 0 else ""
+        print(f"  {name}: {info['count']} [{flag}]{warn}")
+
     print(f"\nDone! Files: {OUT}/")
+
+# ---------------------------------------------------------------------------
+# HTML-ШАБЛОНЫ
+# ---------------------------------------------------------------------------
 
 CAT_HTML = '''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Каталог IT-тендеров</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:sans-serif;background:#0f1419;color:#e6edf3;padding:20px}
