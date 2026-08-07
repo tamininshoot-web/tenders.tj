@@ -632,6 +632,7 @@ def b_cat(df):
     dj = safe_json_embed(recs)
     with open(OUT / f"catalog_{TODAY.isoformat()}.html", "w", encoding="utf-8") as f:
         f.write(CAT_HTML.replace("__DATA__", dj))
+        with open(OUT / "catalog.html", "w", encoding="utf-8") as f: f.write(CAT_HTML.replace("__DATA__", dj))
     print(f"  -> catalog_{TODAY.isoformat()}.html")
 
 def b_dash(df):
@@ -649,6 +650,7 @@ def b_dash(df):
     dj = safe_json_embed(s)
     with open(OUT / f"dashboard_{TODAY.isoformat()}.html", "w", encoding="utf-8") as f:
         f.write(DASH_HTML.replace("__DATA__", dj))
+        with open(OUT / "dashboard.html", "w", encoding="utf-8") as f: f.write(DASH_HTML.replace("__DATA__", dj))
     print(f"  -> dashboard_{TODAY.isoformat()}.html")
 
 async def main():
