@@ -6,9 +6,11 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'archive/**'
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -35,6 +37,24 @@ jobs:
           path: out/
           retention-days: 30
 
+      # Сохраняем дневные снимки каталога/дашборда в репозитории (папка archive/),
+      # чтобы у них была постоянная история и можно было листать архив по датам.
+      # Если за сегодня уже есть снимок — он перезаписывается (не копим 4 копии в день).
+      - name: Save daily snapshot to archive/
+        run: |
+          mkdir -p archive
+          cp out/catalog_*.html archive/ 2>/dev/null || true
+          cp out/dashboard_*.html archive/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add archive/
+          if git diff --cached --quiet; then
+            echo "Архив не изменился, коммит не нужен"
+          else
+            git commit -m "Archive snapshot $(date -u +%Y-%m-%d) [skip ci]"
+            git push
+          fi
+
   deploy:
     needs: parse
     runs-on: ubuntu-latest
@@ -42,12 +62,90 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Забираем main ПОСЛЕ коммита архива, сделанного в job "parse" — иначе
+      # архив за сегодня ещё не попадёт в этот checkout.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/download-artifact@v4
         with:
           name: tenders-output
           path: out/
+
+      - name: Build publish site (latest + archive + sources index)
+        run: |
+          mkdir -p site
+          cp archive/*.html site/ 2>/dev/null || true
+          cp out/catalog.html site/ 2>/dev/null || true
+          cp out/dashboard.html site/ 2>/dev/null || true
+          python3 - <<'PYEOF'
+          import re
+          from pathlib import Path
+
+          site = Path("site")
+          dates = sorted(
+              {m.group(1) for f in site.glob("catalog_*.html")
+               if (m := re.match(r"catalog_(\d{4}-\d{2}-\d{2})\.html", f.name))},
+              reverse=True,
+          )
+          row_parts = []
+          for d in dates:
+              has_dash = (site / f"dashboard_{d}.html").exists()
+              dash_link = f'<a href="dashboard_{d}.html">Дашборд</a>' if has_dash else "—"
+              row_parts.append(
+                  f'<tr><td>{d}</td><td><a href="catalog_{d}.html">Каталог</a></td><td>{dash_link}</td></tr>'
+              )
+          rows = "".join(row_parts)
+
+          sources = [
+              ("World Bank", "https://projects.worldbank.org/en/projects-operations/procurement", "Тендеры по проектам Всемирного банка в Таджикистане (API)"),
+              ("UNDP (ПРООН)", "https://procurement-notices.undp.org/", "Закупки ПРООН по тендерам со словом Tajikistan"),
+              ("investcom.tj", "https://investcom.tj/tenders.html", "Госкоминвест РТ — тендеры по донорским/грантовым проектам"),
+              ("aedpmu.tj", "https://aedpmu.tj/en/category/obyavlenie/tendery/", "AED PMU — тендеры проекта Всемирного банка (SRASP)"),
+              ("tenders.tj", "https://www.tenders.tj/", "Агрегатор госзакупок Таджикистана"),
+              ("eprocurement.gov.tj", "https://eprocurement.gov.tj/ru/searchanno", "Официальный портал электронных госзакупок РТ"),
+          ]
+          sources_rows = "".join(
+              f'<tr><td><a href="{url}" target="_blank">{name}</a></td><td>{desc}</td></tr>'
+              for name, url, desc in sources
+          )
+
+          html = f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+          <title>Тендеры Таджикистан — Архив и источники</title>
+          <style>
+          *{{box-sizing:border-box;margin:0;padding:0}}
+          body{{font-family:sans-serif;background:#0f1419;color:#e6edf3;padding:40px 20px}}
+          .wrap{{max-width:900px;margin:0 auto}}
+          h1{{font-size:28px;background:linear-gradient(135deg,#58a6ff,#a371f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}}
+          h2{{font-size:18px;color:#c9d1d9;margin:32px 0 12px}}
+          .latest{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px;margin:20px 0}}
+          .latest a{{display:inline-block;margin-right:12px;padding:10px 18px;background:#1F6FEB;color:#fff;border-radius:6px;text-decoration:none;font-weight:600}}
+          .sub{{color:#8b949e;font-size:13px;margin-bottom:20px}}
+          table{{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:10px;overflow:hidden}}
+          th,td{{text-align:left;padding:10px 14px;border-bottom:1px solid #30363d;font-size:14px}}
+          th{{color:#8b949e;font-weight:600;text-transform:uppercase;font-size:11px}}
+          a{{color:#58a6ff}}
+          </style></head><body><div class="wrap">
+          <h1>Тендеры IT / оборудование — Таджикистан</h1>
+          <div class="sub">Автообновление каждые 6 часов из 6 источников</div>
+
+          <div class="latest">
+            <strong>Актуальная версия:</strong><br><br>
+            <a href="catalog.html">Открыть каталог</a><a href="dashboard.html">Открыть дашборд</a>
+          </div>
+
+          <h2>Архив по датам ({len(dates)})</h2>
+          <table><tr><th>Дата</th><th>Каталог</th><th>Дашборд</th></tr>{rows}</table>
+
+          <h2>Источники данных</h2>
+          <table><tr><th>Источник</th><th>Что это</th></tr>{sources_rows}</table>
+          </div></body></html>"""
+          Path("site/index.html").write_text(html, encoding="utf-8")
+          print(f"index.html: {len(dates)} дат в архиве")
+          PYEOF
+
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: out/
+          path: site/
       - id: deployment
         uses: actions/deploy-pages@v4
