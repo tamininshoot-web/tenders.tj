@@ -42,6 +42,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tenders-output
+          path: out/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: out/
