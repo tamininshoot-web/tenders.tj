@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Парсер тендеров с донорским финансированием — Таджикистан.
-Собирает тендеры из 6 источников, категоризирует, переводит заголовки
+Собирает тендеры из 11 источников, категоризирует, переводит заголовки
 (best-effort) и генерирует Excel/CSV + HTML-каталог + HTML-дашборд.
 """
 import asyncio, re, json, time, hashlib
@@ -219,6 +219,44 @@ def http_get(url, **kwargs):
                 time.sleep(RETRY_BACKOFF * attempt)
     raise last_exc
 
+# Месяцы на русском и английском — нужны, чтобы вытаскивать даты из текста
+# на сайтах, где нет структурированной разметки дат (energyprojects.tj, EU Delegation, UN).
+_MONTHS = {
+    "january": "01", "february": "02", "march": "03", "april": "04", "may": "05", "june": "06",
+    "july": "07", "august": "08", "september": "09", "october": "10", "november": "11", "december": "12",
+    "января": "01", "февраля": "02", "марта": "03", "апреля": "04", "мая": "05", "июня": "06",
+    "июля": "07", "августа": "08", "сентября": "09", "октября": "10", "ноября": "11", "декабря": "12",
+    "январь": "01", "февраль": "02", "март": "03", "апрель": "04", "май": "05", "июнь": "06",
+    "июль": "07", "август": "08", "сентябрь": "09", "октябрь": "10", "ноябрь": "11", "декабрь": "12",
+}
+_MONTH_DATE_RE = re.compile(
+    r"(\d{1,2})\s+(" + "|".join(_MONTHS.keys()) + r")\s+(\d{4})|"
+    r"(" + "|".join(_MONTHS.keys()) + r")\s+(\d{1,2}),?\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+def extract_date_from_text(text):
+    """Ищет дату вида '16 October 2024' / 'October 16, 2024' / '11.02.2026' в свободном тексте."""
+    if not text:
+        return ""
+    m = _MONTH_DATE_RE.search(text)
+    if m:
+        if m.group(2):  # "DD Month YYYY"
+            d, mon, y = m.group(1), m.group(2).lower(), m.group(3)
+        else:  # "Month DD, YYYY"
+            mon, d, y = m.group(4).lower(), m.group(5), m.group(6)
+        mm = _MONTHS.get(mon)
+        if mm:
+            return f"{y}-{mm}-{int(d):02d}"
+    m2 = re.search(r"(\d{1,2})[./](\d{1,2})[./](\d{4})", text)
+    if m2:
+        return parse_d(m2.group(0))
+    m3 = re.search(r"(\d{1,2})-(\d{1,2})-(\d{4})", text)  # mintrans.tj: "08-07-2026" (DD-MM-YYYY)
+    if m3:
+        d, mo, y = m3.groups()
+        return f"{y}-{mo.zfill(2)}-{d.zfill(2)}"
+    return ""
+
 # ---------------------------------------------------------------------------
 # ИСТОЧНИКИ
 # ---------------------------------------------------------------------------
@@ -228,7 +266,7 @@ def _report(name, count, ok=True):
     print(f"  {name}: {count}" + ("" if ok else "  ⚠ ЗАВЕРШЁН С ОШИБКОЙ"))
 
 def f_wb():
-    print("[1/6] World Bank...")
+    print("[1/11] World Bank...")
     out = []; seen = set(); off = 0
     ok = True
     for _ in range(50):
@@ -280,7 +318,7 @@ def f_wb():
     return out
 
 def f_undp():
-    print("[2/6] UNDP...")
+    print("[2/11] UNDP...")
     out = []; ok = True
     try:
         r = http_get(
@@ -317,7 +355,7 @@ def f_undp():
     return out
 
 def f_inv():
-    print("[3/6] investcom.tj...")
+    print("[3/11] investcom.tj...")
     out = []; ok = True
     try:
         r = http_get("https://investcom.tj/tenders.html", timeout=30)
@@ -360,7 +398,7 @@ def f_inv():
     return out
 
 def f_aed():
-    print("[4/6] aedpmu.tj...")
+    print("[4/11] aedpmu.tj...")
     out = []; ok = True
     try:
         for pg in range(1, 6):
@@ -403,7 +441,7 @@ def f_aed():
     return out
 
 def f_tj():
-    print("[5/6] tenders.tj...")
+    print("[5/11] tenders.tj...")
     out = []; ok = True
     base = "https://www.tenders.tj"
     try:
@@ -447,7 +485,7 @@ def f_tj():
                 if m7: rec["region"] = m7.group(1).strip()
                 m8 = re.search(r"Описание:\s*([^\n]+)", txt)
                 if m8: rec["description"] = m8.group(1).strip()
-                # если категория ещё не определено осмысленно — пересчитываем с учётом деталей страницы
+                # если категория ещё не определена осмысленно — пересчитываем с учётом деталей страницы
                 if rec.get("category") == "Other Services":
                     rec["category"] = categorize(rec.get("title_ru", ""), rec.get("description", ""))
             except Exception:
@@ -459,7 +497,7 @@ def f_tj():
     return out
 
 async def f_eproc():
-    print("[6/6] eprocurement.gov.tj...")
+    print("[6/11] eprocurement.gov.tj...")
     out = []; ok = True
     if not HAS_PW:
         _report("eprocurement.gov.tj", 0, False)
@@ -531,6 +569,252 @@ async def f_eproc():
     except Exception as e:
         print(f"  err: {e}"); ok = False
     _report("eprocurement.gov.tj", len(out), ok)
+    return out
+
+# ---------------------------------------------------------------------------
+# НОВЫЕ ИСТОЧНИКИ (добавлены по запросу пользователя, на основе присланного
+# списка мониторинга + собственного анализа рынка). Каждый — best-effort:
+# структура страниц угадана по snapshot'ам без возможности живого теста,
+# поэтому селекторы устойчивые (несколько fallback-стратегий), а не жёсткие.
+# ---------------------------------------------------------------------------
+
+def f_energyprojects():
+    """energyprojects.tj — Группа реализации энергетических проектов при Президенте РТ
+    (Рогунская ГЭС). Финансируется Всемирным банком/AIIB/IsDB, есть тендеры на IT/оборудование."""
+    print("[7/11] energyprojects.tj...")
+    out = []; ok = True
+    base = "https://energyprojects.tj"
+    try:
+        r = http_get(f"{base}/ru/procurement", timeout=30)
+        soup = BeautifulSoup(r.text, "lxml")
+        seen_href = set()
+        for a in soup.find_all("a", href=re.compile(r"/procurement/[a-z0-9\-]+-\d+/?$", re.I)):
+            href = a.get("href", "")
+            if href in seen_href:
+                continue
+            seen_href.add(href)
+            full_url = href if href.startswith("http") else f"{base}{href}"
+            title = a.get_text(strip=True)
+            container = a.find_parent(["div", "article", "li"]) or a.parent
+            if not title:
+                h = container.find(["h2", "h3"]) if container else None
+                title = h.get_text(strip=True) if h else ""
+            if not title or len(title) < 5:
+                continue
+            block_text = container.get_text(" ", strip=True) if container else ""
+            pub_date = extract_date_from_text(block_text)
+            if not in_win(pub_date):
+                continue
+            m = re.search(r"-(\d+)/?$", href)
+            tender_id = m.group(1) if m else make_stable_id(href, title)
+            out.append(norm({
+                "source": "energyprojects.tj", "tender_id": tender_id,
+                "title_ru": title, "title_original": title,
+                "donor": "World Bank (IDA/IBRD)", "funding_type": "Loan/Credit/Grant",
+                "country": "Tajikistan", "organization": "Rogun HPP PMG",
+                "publication_date": pub_date, "source_url": full_url,
+                "description": block_text[:1000], "language": "Russian",
+            }))
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("energyprojects.tj", len(out), ok)
+    return out
+
+def f_mewr():
+    """mewr.tj — Министерство энергетики и водных ресурсов РТ. WordPress,
+    категория 'Объявления и Вакансии' (cat=1) смешивает тендеры и вакансии —
+    фильтруем по ключевым словам в заголовке через categorize()."""
+    print("[8/11] mewr.tj...")
+    out = []; ok = True
+    base = "https://www.mewr.tj"
+    try:
+        for page in range(1, 4):
+            url = f"{base}/?cat=1" + (f"&paged={page}" if page > 1 else "")
+            try:
+                r = http_get(url, timeout=30)
+            except Exception:
+                break
+            soup = BeautifulSoup(r.text, "lxml")
+            arts = soup.find_all("article") or soup.select(".post, .entry")
+            if not arts:
+                break
+            found_any = False
+            for art in arts:
+                h = art.find(["h1", "h2", "h3"])
+                lnk = (h.find("a", href=True) if h else None) or art.find("a", href=True)
+                if not lnk:
+                    continue
+                title = (h.get_text(strip=True) if h else lnk.get_text(strip=True))
+                url_full = lnk["href"]
+                if not title or len(title) < 5:
+                    continue
+                found_any = True
+                # Тендеры/закупки — по ключевым словам в заголовке (страница смешивает с вакансиями)
+                low = title.lower()
+                if not any(k in low for k in ["закуп", "тендер", "заявлен", "конкурс", "заинтересован", "предложен"]):
+                    continue
+                te = art.find("time")
+                pub_date = ""
+                if te and te.get("datetime"):
+                    pub_date = parse_d(te["datetime"])
+                if not pub_date:
+                    pub_date = extract_date_from_text(art.get_text(" ", strip=True))
+                if not in_win(pub_date):
+                    continue
+                m = re.search(r"[?&]p=(\d+)", url_full)
+                tender_id = m.group(1) if m else make_stable_id(url_full, title)
+                out.append(norm({
+                    "source": "mewr.tj", "tender_id": tender_id,
+                    "title_ru": title, "title_original": title,
+                    "donor": "World Bank (IDA/IBRD)", "funding_type": "Loan/Credit/Grant",
+                    "country": "Tajikistan", "organization": "Министерство энергетики и водных ресурсов РТ",
+                    "publication_date": pub_date, "source_url": url_full, "language": "Russian",
+                }))
+            if not found_any:
+                break
+            time.sleep(0.3)
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("mewr.tj", len(out), ok)
+    return out
+
+def f_mintrans():
+    """mintrans.tj/tender-page — Министерство транспорта РТ. Одна длинная страница
+    (Laravel), записи в формате 'Дата: DD-MM-YYYY' + заголовок + ссылка на PDF."""
+    print("[9/11] mintrans.tj...")
+    out = []; ok = True
+    try:
+        r = http_get("https://www.mintrans.tj/tender-page", timeout=30)
+        soup = BeautifulSoup(r.text, "lxml")
+        text_blocks = soup.get_text("\n", strip=True).split("\n")
+        # Ищем ссылки на PDF (каждая запись оканчивается ссылкой "Показать" на файл в /storage/tender/)
+        pdf_links = soup.find_all("a", href=re.compile(r"/storage/tender/.*\.pdf$", re.I))
+        for lnk in pdf_links:
+            container = lnk.find_parent(["div", "article"]) or lnk
+            # Поднимаемся на пару уровней, чтобы захватить дату+заголовок+описание, которые
+            # на этом сайте лежат рядом с картинкой-ссылкой, а не внутри одного маленького блока
+            block = container
+            for _ in range(3):
+                if block.parent:
+                    block = block.parent
+            block_text = block.get_text(" ", strip=True)
+            dm = re.search(r"Дата:\s*(\d{2}-\d{2}-\d{4})", block_text)
+            pub_date = ""
+            if dm:
+                d, mo, y = dm.group(1).split("-")
+                pub_date = f"{y}-{mo}-{d}"
+            if not in_win(pub_date):
+                continue
+            h = block.find(["h3", "h4", "h5"])
+            title = h.get_text(strip=True) if h else ""
+            if not title or len(title) < 5:
+                continue
+            file_url = lnk["href"]
+            if not file_url.startswith("http"):
+                file_url = f"https://www.mintrans.tj{file_url}"
+            tender_id = make_stable_id(title, pub_date, file_url)
+            out.append(norm({
+                "source": "mintrans.tj", "tender_id": tender_id,
+                "title_ru": title, "title_original": title,
+                "donor": "Различные (WB/ADB/AIIB/IsDB)", "funding_type": "Loan/Credit/Grant",
+                "country": "Tajikistan", "organization": "Министерство транспорта РТ",
+                "publication_date": pub_date, "documents_url": file_url,
+                "source_url": "https://www.mintrans.tj/tender-page#" + tender_id,
+                "language": "Russian",
+            }))
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("mintrans.tj", len(out), ok)
+    return out
+
+def f_un_tj():
+    """tajikistan.un.org — общая лента вакансий+тендеров агентств ООН и партнёрских
+    НКО (IFRC, Mission East, AKDN и др.) в Таджикистане. Фильтруем по ключевым словам."""
+    print("[10/11] tajikistan.un.org...")
+    out = []; ok = True
+    base = "https://tajikistan.un.org"
+    # Осознанно НЕ включаем голое "procurement" — оно ложно совпадает с вакансиями
+    # вида "Procurement Specialist", "Procurement Officer" и т.п.
+    TENDER_KEYWORDS = [
+        "tender", "rfp", "rfq", " eoi", "expression of interest",
+        "invitation to bid", "invitation for bid", "request for proposal",
+        "request for quotation", "call for tenders", "supply of",
+        "procurement notice", "procurement of", "invitation to tender",
+    ]
+    try:
+        for page in range(0, 4):
+            url = f"{base}/en/jobs" + (f"?page={page}" if page > 0 else "")
+            try:
+                r = http_get(url, timeout=30)
+            except Exception:
+                break
+            soup = BeautifulSoup(r.text, "lxml")
+            found_any = False
+            for a in soup.find_all("a", href=re.compile(r"^/en/\d+-[a-z0-9-]+", re.I)):
+                title = a.get_text(strip=True)
+                if not title or len(title) < 8:
+                    continue
+                found_any = True
+                low = title.lower()
+                if not any(k in low for k in TENDER_KEYWORDS):
+                    continue
+                href = a["href"]
+                url_full = href if href.startswith("http") else f"{base}{href}"
+                m = re.search(r"^/en/(\d+)-", href)
+                tender_id = m.group(1) if m else make_stable_id(url_full, title)
+                out.append(norm({
+                    "source": "tajikistan.un.org", "tender_id": tender_id,
+                    "title_en": title, "title_original": title,
+                    "donor": "UN Agencies / Partners", "funding_type": "Grant",
+                    "country": "Tajikistan", "source_url": url_full,
+                    "language": "English",
+                }))
+            if not found_any:
+                break
+            time.sleep(0.3)
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("tajikistan.un.org", len(out), ok)
+    return out
+
+def f_eeas():
+    """eeas.europa.eu — Представительство Евросоюза в Таджикистане. Общая лента
+    новостей+тендеров, фильтруем по ключевым словам в заголовке (как для UN)."""
+    print("[11/11] EU Delegation Tajikistan...")
+    out = []; ok = True
+    base = "https://www.eeas.europa.eu"
+    TENDER_KEYWORDS = [
+        "tender", "call for tenders", "procurement", "call for expression",
+        "invitation to tender", "supply of", "purchase of",
+    ]
+    try:
+        r = http_get(f"{base}/delegations/tajikistan_en?s=228", timeout=30)
+        soup = BeautifulSoup(r.text, "lxml")
+        for a in soup.find_all("a", href=re.compile(r"/delegations/tajikistan/[a-z0-9\-]+_en", re.I)):
+            title = a.get_text(strip=True)
+            if not title or len(title) < 8:
+                continue
+            low = title.lower()
+            if not any(k in low for k in TENDER_KEYWORDS):
+                continue
+            href = a["href"]
+            url_full = href if href.startswith("http") else f"{base}{href}"
+            container = a.find_parent(["div", "article", "li"]) or a
+            pub_date = extract_date_from_text(container.get_text(" ", strip=True))
+            if not in_win(pub_date):
+                continue
+            tender_id = make_stable_id(url_full, title)
+            out.append(norm({
+                "source": "eeas.europa.eu", "tender_id": tender_id,
+                "title_en": title, "title_original": title,
+                "donor": "European Union", "funding_type": "Grant",
+                "country": "Tajikistan", "organization": "EU Delegation to Tajikistan",
+                "publication_date": pub_date, "source_url": url_full,
+                "language": "English",
+            }))
+    except Exception as e:
+        print(f"  err: {e}"); ok = False
+    _report("eeas.europa.eu", len(out), ok)
     return out
 
 # ---------------------------------------------------------------------------
@@ -630,10 +914,14 @@ def b_cat(df):
             'source_url': str(r.get('source_url', '')) if pd.notna(r.get('source_url', '')) else '#',
         })
     dj = safe_json_embed(recs)
+    cat_html_out = CAT_HTML.replace("__DATA__", dj)
     with open(OUT / f"catalog_{TODAY.isoformat()}.html", "w", encoding="utf-8") as f:
-        f.write(CAT_HTML.replace("__DATA__", dj))
-        with open(OUT / "catalog.html", "w", encoding="utf-8") as f: f.write(CAT_HTML.replace("__DATA__", dj))
-    print(f"  -> catalog_{TODAY.isoformat()}.html")
+        f.write(cat_html_out)
+    # Стабильная копия без даты в имени — "последняя версия", чтобы на неё можно
+    # было дать одну постоянную ссылку, не меняющуюся при каждом запуске.
+    with open(OUT / "catalog.html", "w", encoding="utf-8") as f:
+        f.write(cat_html_out)
+    print(f"  -> catalog_{TODAY.isoformat()}.html (+ catalog.html)")
 
 def b_dash(df):
     print("Dashboard...")
@@ -648,10 +936,13 @@ def b_dash(df):
         'by_pub_month': df[df['pub_m'] != '—'].groupby('pub_m').size().to_dict(),
     }
     dj = safe_json_embed(s)
+    dash_html_out = DASH_HTML.replace("__DATA__", dj)
     with open(OUT / f"dashboard_{TODAY.isoformat()}.html", "w", encoding="utf-8") as f:
-        f.write(DASH_HTML.replace("__DATA__", dj))
-        with open(OUT / "dashboard.html", "w", encoding="utf-8") as f: f.write(DASH_HTML.replace("__DATA__", dj))
-    print(f"  -> dashboard_{TODAY.isoformat()}.html")
+        f.write(dash_html_out)
+    # Стабильная копия без даты — "последняя версия"
+    with open(OUT / "dashboard.html", "w", encoding="utf-8") as f:
+        f.write(dash_html_out)
+    print(f"  -> dashboard_{TODAY.isoformat()}.html (+ dashboard.html)")
 
 async def main():
     print(f"\n=== Run: {NOW.isoformat()} ===\n")
@@ -662,6 +953,11 @@ async def main():
     all_r.extend(f_aed())
     all_r.extend(f_tj())
     all_r.extend(await f_eproc())
+    all_r.extend(f_energyprojects())
+    all_r.extend(f_mewr())
+    all_r.extend(f_mintrans())
+    all_r.extend(f_un_tj())
+    all_r.extend(f_eeas())
 
     seen = set(); uniq = []
     for r in all_r:
