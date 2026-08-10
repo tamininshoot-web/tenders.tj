@@ -104,6 +104,11 @@ jobs:
               ("aedpmu.tj", "https://aedpmu.tj/en/category/obyavlenie/tendery/", "AED PMU — тендеры проекта Всемирного банка (SRASP)"),
               ("tenders.tj", "https://www.tenders.tj/", "Агрегатор госзакупок Таджикистана"),
               ("eprocurement.gov.tj", "https://eprocurement.gov.tj/ru/searchanno", "Официальный портал электронных госзакупок РТ"),
+              ("energyprojects.tj", "https://energyprojects.tj/ru/procurement", "Группа реализации энергопроектов при Президенте РТ (Рогунская ГЭС, WB/AIIB/IsDB)"),
+              ("mewr.tj", "https://www.mewr.tj/?cat=1", "Министерство энергетики и водных ресурсов РТ"),
+              ("mintrans.tj", "https://www.mintrans.tj/tender-page", "Министерство транспорта РТ"),
+              ("tajikistan.un.org", "https://tajikistan.un.org/en/jobs", "Агентства ООН и партнёрские НКО в Таджикистане (IFRC, Mission East, AKDN и др.)"),
+              ("eeas.europa.eu", "https://www.eeas.europa.eu/delegations/tajikistan_en", "Представительство Евросоюза в Таджикистане"),
           ]
           sources_rows = "".join(
               f'<tr><td><a href="{url}" target="_blank">{name}</a></td><td>{desc}</td></tr>'
@@ -127,7 +132,7 @@ jobs:
           a{{color:#58a6ff}}
           </style></head><body><div class="wrap">
           <h1>Тендеры IT / оборудование — Таджикистан</h1>
-          <div class="sub">Автообновление каждые 6 часов из 6 источников</div>
+          <div class="sub">Автообновление каждые 6 часов из 11 источников</div>
 
           <div class="latest">
             <strong>Актуальная версия:</strong><br><br>
