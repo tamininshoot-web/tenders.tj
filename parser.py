@@ -580,12 +580,15 @@ async def f_eproc():
 
 def f_energyprojects():
     """energyprojects.tj — Группа реализации энергетических проектов при Президенте РТ
-    (Рогунская ГЭС). Финансируется Всемирным банком/AIIB/IsDB, есть тендеры на IT/оборудование."""
+    (Рогунская ГЭС). Финансируется Всемирным банком/AIIB/IsDB, есть тендеры на IT/оборудование.
+    ВАЖНО: у сайта две версии — старая Joomla (index.php/ru/tendery) и текущая Next.js
+    (/en/procurement, /ru/procurement). RU-версия отдаёт заметно меньше карточек, чем EN —
+    используем EN как основной источник и переводим заголовки через translate_en_ru()."""
     print("[7/11] energyprojects.tj...")
     out = []; ok = True
     base = "https://energyprojects.tj"
     try:
-        r = http_get(f"{base}/ru/procurement", timeout=30)
+        r = http_get(f"{base}/en/procurement", timeout=30)
         soup = BeautifulSoup(r.text, "lxml")
         seen_href = set()
         for a in soup.find_all("a", href=re.compile(r"/procurement/[a-z0-9\-]+-\d+/?$", re.I)):
@@ -609,11 +612,11 @@ def f_energyprojects():
             tender_id = m.group(1) if m else make_stable_id(href, title)
             out.append(norm({
                 "source": "energyprojects.tj", "tender_id": tender_id,
-                "title_ru": title, "title_original": title,
+                "title_en": title, "title_original": title,
                 "donor": "World Bank (IDA/IBRD)", "funding_type": "Loan/Credit/Grant",
                 "country": "Tajikistan", "organization": "Rogun HPP PMG",
                 "publication_date": pub_date, "source_url": full_url,
-                "description": block_text[:1000], "language": "Russian",
+                "description": block_text[:1000], "language": "English",
             }))
     except Exception as e:
         print(f"  err: {e}"); ok = False
@@ -622,8 +625,9 @@ def f_energyprojects():
 
 def f_mewr():
     """mewr.tj — Министерство энергетики и водных ресурсов РТ. WordPress,
-    категория 'Объявления и Вакансии' (cat=1) смешивает тендеры и вакансии —
-    фильтруем по ключевым словам в заголовке через categorize()."""
+    категория 'Объявления и Вакансии' (cat=1) смешивает тендеры и вакансии.
+    ВАЖНО: не полагаемся на конкретную тему/структуру <article> — ищем напрямую
+    ссылки вида ?p=NNNN (стабильный паттерн WordPress-пермалинков независимо от темы)."""
     print("[8/11] mewr.tj...")
     out = []; ok = True
     base = "https://www.mewr.tj"
@@ -635,36 +639,38 @@ def f_mewr():
             except Exception:
                 break
             soup = BeautifulSoup(r.text, "lxml")
-            arts = soup.find_all("article") or soup.select(".post, .entry")
-            if not arts:
+            links = soup.find_all("a", href=re.compile(r"[?&]p=\d+"))
+            if not links:
                 break
+            seen_ids = set()
             found_any = False
-            for art in arts:
-                h = art.find(["h1", "h2", "h3"])
-                lnk = (h.find("a", href=True) if h else None) or art.find("a", href=True)
-                if not lnk:
+            for lnk in links:
+                url_full = lnk.get("href", "")
+                m = re.search(r"[?&]p=(\d+)", url_full)
+                if not m:
                     continue
-                title = (h.get_text(strip=True) if h else lnk.get_text(strip=True))
-                url_full = lnk["href"]
+                post_id = m.group(1)
+                if post_id in seen_ids:
+                    continue
+                title = lnk.get_text(strip=True)
                 if not title or len(title) < 5:
                     continue
+                seen_ids.add(post_id)
                 found_any = True
-                # Тендеры/закупки — по ключевым словам в заголовке (страница смешивает с вакансиями)
                 low = title.lower()
                 if not any(k in low for k in ["закуп", "тендер", "заявлен", "конкурс", "заинтересован", "предложен"]):
                     continue
-                te = art.find("time")
+                container = lnk.find_parent(["article", "div", "li"]) or lnk
+                te = container.find("time")
                 pub_date = ""
                 if te and te.get("datetime"):
                     pub_date = parse_d(te["datetime"])
                 if not pub_date:
-                    pub_date = extract_date_from_text(art.get_text(" ", strip=True))
+                    pub_date = extract_date_from_text(container.get_text(" ", strip=True))
                 if not in_win(pub_date):
                     continue
-                m = re.search(r"[?&]p=(\d+)", url_full)
-                tender_id = m.group(1) if m else make_stable_id(url_full, title)
                 out.append(norm({
-                    "source": "mewr.tj", "tender_id": tender_id,
+                    "source": "mewr.tj", "tender_id": post_id,
                     "title_ru": title, "title_original": title,
                     "donor": "World Bank (IDA/IBRD)", "funding_type": "Loan/Credit/Grant",
                     "country": "Tajikistan", "organization": "Министерство энергетики и водных ресурсов РТ",
@@ -778,40 +784,49 @@ def f_un_tj():
     return out
 
 def f_eeas():
-    """eeas.europa.eu — Представительство Евросоюза в Таджикистане. Общая лента
-    новостей+тендеров, фильтруем по ключевым словам в заголовке (как для UN)."""
+    """eeas.europa.eu — Представительство Евросоюза в Таджикистане.
+    ВАЖНО: тендеры лежат НЕ на общей странице делегации, а в отдельном разделе
+    /eeas/tenders_en с фильтром по стране (tender_site=Tajikistan) — там уже
+    предотфильтрованный список, доп. keyword-фильтр не нужен."""
     print("[11/11] EU Delegation Tajikistan...")
     out = []; ok = True
     base = "https://www.eeas.europa.eu"
-    TENDER_KEYWORDS = [
-        "tender", "call for tenders", "procurement", "call for expression",
-        "invitation to tender", "supply of", "purchase of",
-    ]
     try:
-        r = http_get(f"{base}/delegations/tajikistan_en?s=228", timeout=30)
-        soup = BeautifulSoup(r.text, "lxml")
-        for a in soup.find_all("a", href=re.compile(r"/delegations/tajikistan/[a-z0-9\-]+_en", re.I)):
-            title = a.get_text(strip=True)
-            if not title or len(title) < 8:
-                continue
-            low = title.lower()
-            if not any(k in low for k in TENDER_KEYWORDS):
-                continue
-            href = a["href"]
-            url_full = href if href.startswith("http") else f"{base}{href}"
-            container = a.find_parent(["div", "article", "li"]) or a
-            pub_date = extract_date_from_text(container.get_text(" ", strip=True))
-            if not in_win(pub_date):
-                continue
-            tender_id = make_stable_id(url_full, title)
-            out.append(norm({
-                "source": "eeas.europa.eu", "tender_id": tender_id,
-                "title_en": title, "title_original": title,
-                "donor": "European Union", "funding_type": "Grant",
-                "country": "Tajikistan", "organization": "EU Delegation to Tajikistan",
-                "publication_date": pub_date, "source_url": url_full,
-                "language": "English",
-            }))
+        for page in range(0, 3):
+            url = f"{base}/eeas/tenders_en?f%5B0%5D=tender_site%3ATajikistan" + (f"&page={page}" if page > 0 else "")
+            try:
+                r = http_get(url, timeout=30)
+            except Exception:
+                break
+            soup = BeautifulSoup(r.text, "lxml")
+            links = soup.find_all("a", href=re.compile(r"/delegations/tajikistan/[a-z0-9\-%]+_en", re.I))
+            if not links:
+                break
+            found_any = False
+            for a in links:
+                title = a.get_text(strip=True)
+                if not title or len(title) < 8:
+                    continue
+                found_any = True
+                href = a["href"]
+                url_full = href if href.startswith("http") else f"{base}{href}"
+                container = a.find_parent(["div", "article", "li"]) or a
+                block_text = container.get_text(" ", strip=True)
+                pub_date = extract_date_from_text(block_text)
+                if not in_win(pub_date):
+                    continue
+                tender_id = make_stable_id(url_full, title)
+                out.append(norm({
+                    "source": "eeas.europa.eu", "tender_id": tender_id,
+                    "title_en": title, "title_original": title,
+                    "donor": "European Union", "funding_type": "Grant",
+                    "country": "Tajikistan", "organization": "EU Delegation to Tajikistan",
+                    "publication_date": pub_date, "source_url": url_full,
+                    "description": block_text[:500], "language": "English",
+                }))
+            if not found_any:
+                break
+            time.sleep(0.3)
     except Exception as e:
         print(f"  err: {e}"); ok = False
     _report("eeas.europa.eu", len(out), ok)
