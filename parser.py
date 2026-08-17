@@ -265,6 +265,20 @@ def _report(name, count, ok=True):
     SOURCE_SUMMARY[name] = {"count": count, "ok": ok}
     print(f"  {name}: {count}" + ("" if ok else "  ⚠ ЗАВЕРШЁН С ОШИБКОЙ"))
 
+def _diag(name, r=None, soup=None, note=""):
+    """Диагностика при 0 записей: код ответа, размер, начало текста/тайтла страницы."""
+    try:
+        if r is not None:
+            print(f"  [DIAG {name}] status={r.status_code} len={len(r.text)} url={r.url}")
+            print(f"  [DIAG {name}] head300={r.text[:300]!r}")
+        if soup is not None:
+            t = soup.find("title")
+            print(f"  [DIAG {name}] title={t.get_text(strip=True) if t else None!r}")
+        if note:
+            print(f"  [DIAG {name}] note={note}")
+    except Exception as e:
+        print(f"  [DIAG {name}] diag_err={e}")
+
 def f_wb():
     print("[1/11] World Bank...")
     out = []; seen = set(); off = 0
@@ -351,6 +365,8 @@ def f_undp():
             }))
     except Exception as e:
         print(f"  err: {e}"); ok = False
+    if len(out) == 0:
+        _diag("UNDP", r=locals().get("r"), soup=locals().get("soup"))
     _report("UNDP", len(out), ok)
     return out
 
@@ -568,6 +584,9 @@ async def f_eproc():
             await b.close()
     except Exception as e:
         print(f"  err: {e}"); ok = False
+    if len(out) == 0:
+        print(f"  [DIAG eprocurement.gov.tj] HAS_PW={HAS_PW}")
+        _diag("eprocurement.gov.tj", soup=locals().get("soup"))
     _report("eprocurement.gov.tj", len(out), ok)
     return out
 
@@ -620,6 +639,8 @@ def f_energyprojects():
             }))
     except Exception as e:
         print(f"  err: {e}"); ok = False
+    if len(out) == 0:
+        _diag("energyprojects.tj", r=locals().get("r"), soup=locals().get("soup"))
     _report("energyprojects.tj", len(out), ok)
     return out
 
@@ -681,6 +702,8 @@ def f_mewr():
             time.sleep(0.3)
     except Exception as e:
         print(f"  err: {e}"); ok = False
+    if len(out) == 0:
+        _diag("mewr.tj", r=locals().get("r"), soup=locals().get("soup"))
     _report("mewr.tj", len(out), ok)
     return out
 
@@ -780,6 +803,8 @@ def f_un_tj():
             time.sleep(0.3)
     except Exception as e:
         print(f"  err: {e}"); ok = False
+    if len(out) == 0:
+        _diag("tajikistan.un.org", r=locals().get("r"), soup=locals().get("soup"))
     _report("tajikistan.un.org", len(out), ok)
     return out
 
@@ -829,6 +854,8 @@ def f_eeas():
             time.sleep(0.3)
     except Exception as e:
         print(f"  err: {e}"); ok = False
+    if len(out) == 0:
+        _diag("eeas.europa.eu", r=locals().get("r"), soup=locals().get("soup"))
     _report("eeas.europa.eu", len(out), ok)
     return out
 
