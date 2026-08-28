@@ -305,8 +305,8 @@ def f_wb():
                 notice_type = str(n.get("notice_type_name", "") or "")
                 if "award" in notice_type.lower():
                     continue
-                    title_en = n.get("project_name", "")
-                out.append(norm({
+                title_en = n.get("project_name", "")
+            out.append(norm({
                     "source": "World Bank", "tender_id": nid, "title_en": title_en,
                     "title_original": title_en, "donor": "World Bank (IDA/IBRD)",
                     "funding_type": "Loan/Credit/Grant", "country": "Tajikistan",
