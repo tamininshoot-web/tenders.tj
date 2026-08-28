@@ -302,7 +302,10 @@ def f_wb():
                 seen.add(nid)
                 if not in_win(parse_d(n.get("noticedate", ""))):
                     continue
-                title_en = n.get("project_name", "")
+                notice_type = str(n.get("notice_type_name", "") or "")
+                if "award" in notice_type.lower():
+                    continue
+                    title_en = n.get("project_name", "")
                 out.append(norm({
                     "source": "World Bank", "tender_id": nid, "title_en": title_en,
                     "title_original": title_en, "donor": "World Bank (IDA/IBRD)",
@@ -911,10 +914,6 @@ def b_cat(df):
     def st(row):
         dl = row['dl_dt']; src = row['source']
         if pd.isna(dl):
-            if src == 'World Bank':
-                return 'Активен (ВБ)'
-            if src == 'aedpmu.tj':
-                return 'Активен (aedpmu)'
             return 'Без дедлайна'
         days = (dl - pd.Timestamp(NOW)).days
         if days < 0:
